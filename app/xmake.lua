@@ -1,0 +1,5 @@
+target("gallery")
+    set_kind("binary")
+    add_deps("GalleryRT")
+    add_files("main.cpp")
+target_end()
