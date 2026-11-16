@@ -1,0 +1,2094 @@
+{
+  "schema": 1,
+  "note": "Targets currently built by LuisaCompute/examples/ (union of examples/xmake.lua + examples/CMakeLists.txt and the per-directory build files). 'sources' are relative to the group dir, which becomes src/<dir>/. Tokens: $LC = LuisaCompute root, $SRC = this repo's src/ root (the old examples/ root), $GROUP = src/<dir>. 'deps' list only EXTRA xmake targets beyond the per-target defaults (lc-runtime, lc-dsl, lc-vstl, stb-image, plus lc-gui when gui_dep/gui); lc-ast/lc-xir do not exist as xmake targets, so XIR-gated targets only carry the 'xir' condition key. 'requires' is AND-only: OR-conditions are spelled out in 'notes' (example_dstorage). ios_only targets intentionally have no 'sources' (their TUs are shared with the desktop examples and generated at configure time). 'mirror_as_test'==true means the CMake file passed MIRROR_AS_TEST, which also creates a test_<name> executable from the same sources.",
+  "groups": [
+    {
+      "dir": "rendering",
+      "targets": [
+        {
+          "name": "example_path_tracing",
+          "kind": "binary",
+          "sources": [
+            "path_tracing.cpp",
+            "path_tracing_test.h"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "cmake also lists rendering/path_tracing_test.h as a source; the TU is shared with the iOS bundle and src/tests",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_camera",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_camera.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_cutout",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_cutout.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` plus cutout extras: `--trace-mode cutout-query|accept-query|opaque-query|direct|omm`, `--omm-level N`, `--omm-conservative`, `--ray-query-lowering pipeline|loop`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_hdr",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_hdr.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_nested_callable",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_nested_callable.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_ray_masks",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_ray_masks.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_spectrum",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_spectrum.cpp"
+          ],
+          "deps": [],
+          "defines": [
+            {
+              "value": "LUISA_BIN_2_OBJ",
+              "when": null
+            }
+          ],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "objcopy": [
+            {
+              "file": "$LC/src/tests/SRGBToFourierEvenPacked.dat",
+              "ext": ".dat",
+              "define": "LUISA_BIN_2_OBJ",
+              "base": "srgb_to_fourier_embedded"
+            }
+          ],
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake embeds src/tests/SRGBToFourierEvenPacked.dat with the utils.bin2obj rule and defines LUISA_BIN_2_OBJ (srgb_to_fourier_embedded.hpp then uses _binary_*_dat_start/_end symbols). cmake instead builds luisa_embed_device_lib (custom target luisa-compute-example-spectrum-embed) and regenerates rendering/srgb_to_fourier_embedded.{cpp,h} INTO the source tree, adding them as sources; the checked-in srgb_to_fourier_embedded.{cpp,h,hpp} must move with this group. The .dat file itself lives in LuisaCompute/src/tests and does NOT move",
+          "headless_skip": {
+            "cuda": "the CUDA backend rejects the R10G10B10A2 volume this example samples (LuisaCompute limitation; dx/vk run it)"
+          },
+          "headless": []
+        },
+        {
+          "name": "example_photon_mapping",
+          "kind": "binary",
+          "sources": [
+            "photon_mapping.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_sdf_renderer",
+          "kind": "binary",
+          "sources": [
+            "sdf_renderer.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_blackhole",
+          "kind": "binary",
+          "sources": [
+            "blackhole.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_voxel_raytracer",
+          "kind": "binary",
+          "sources": [
+            "voxel_raytracer.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_procedural",
+          "kind": "binary",
+          "sources": [
+            "procedural.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_shader_toy",
+          "kind": "binary",
+          "sources": [
+            "shader_toy.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake builds it only with the GUI module enabled (gui_dep=true); the CMake file builds it outside the LUISA_COMPUTE_ENABLE_GUI guard",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_shader_toy_spacex",
+          "kind": "binary",
+          "sources": [
+            "shader_toy_spacex.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "usage: `shader_toy_spacex <backend> [<image>] [--offline] [--iterations N] [-c <ref.png>]`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_shader_visuals_present",
+          "kind": "binary",
+          "sources": [
+            "shader_visuals_present.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_path_tracing_xir2ast",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_xir2ast.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui",
+            "xir"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake gates it on lc_enable_xir (and GUI); cmake gates it on TARGET luisa-compute-xir inside the GUI block. examples/ios/CMakeLists.txt also builds an iOS bundle from the same source",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_sdf_renderer_xir2ast",
+          "kind": "binary",
+          "sources": [
+            "sdf_renderer_xir2ast.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui",
+            "xir"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake gates it on lc_enable_xir (and GUI); cmake gates it on TARGET luisa-compute-xir inside the GUI block. examples/ios/CMakeLists.txt also builds an iOS bundle from the same source",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_coro_sdf_renderer",
+          "kind": "binary",
+          "sources": [
+            "coro_sdf_renderer.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "`--spp N`, `--compare ref.png`, `--scheduler state_machine|wavefront|persistent` (ref::ExampleOptions)",
+          "notes": "xmake gates it on lc_enable_xir and adds lc-coro; cmake builds it unconditionally (no xir gate, no explicit coro target - the luisa::compute umbrella covers it). Also built as an iOS bundle",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_coro_path_tracing",
+          "kind": "binary",
+          "sources": [
+            "coro_path_tracing.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1` plus `--resolution N`, `--sample-dispatch|--batch-dispatch`",
+          "notes": "xmake gates it on lc_enable_xir and adds lc-coro; cmake builds it unconditionally. Also built as an iOS bundle",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_coro_path_tracing_wavefront",
+          "kind": "binary",
+          "sources": [
+            "coro_path_tracing.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "defines": [
+            {
+              "value": "LUISA_CORO_PATH_TRACING_SAMPLE_DISPATCH_DEFAULT=1",
+              "when": null
+            }
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "same TU as example_coro_path_tracing, only the compile definition differs (both build systems do this)",
+          "headless": [
+            "--spp",
+            "1",
+            "--frames",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "dir": "simulation",
+      "targets": [
+        {
+          "name": "example_fire_simulation",
+          "kind": "binary",
+          "sources": [
+            "fire_simulation.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_game_of_life",
+          "kind": "binary",
+          "sources": [
+            "game_of_life.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake builds it only with the GUI module enabled (gui_dep=true); the CMake file builds it outside the LUISA_COMPUTE_ENABLE_GUI guard",
+          "headless": [
+            "--frames",
+            "2"
+          ]
+        },
+        {
+          "name": "example_mpm3d",
+          "kind": "binary",
+          "sources": [
+            "mpm3d.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_mpm88",
+          "kind": "binary",
+          "sources": [
+            "mpm88.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_nbody_simulation",
+          "kind": "binary",
+          "sources": [
+            "nbody_simulation.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "also includes ../common/nbody_render_plan.h (group-local shared header)",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_wave_equation",
+          "kind": "binary",
+          "sources": [
+            "wave_equation.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "dir": "gui",
+      "targets": [
+        {
+          "name": "example_imgui",
+          "kind": "binary",
+          "sources": [
+            "imgui.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no headless path: opens an ImGui/window swapchain (needs the gui module + a graphics backend)",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_mnist",
+          "kind": "shared",
+          "sources": [
+            "mnist.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui",
+            "cuda"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no; a SHARED library with no main() (driven by gui/test_mnist.py and a host app)",
+          "notes": "built as a SHARED library in both build systems (xmake project_kind=shared, cmake add_library(... SHARED)); cmake additionally sets EXCLUDE_FROM_ALL and only builds it with CUDA enabled (needs CUDA + DX/VK interop, see gui/test_mnist.py). Never mirrored as a test",
+          "headless_skip": "needs MNIST weights on disk"
+        },
+        {
+          "name": "example_swapchain",
+          "kind": "binary",
+          "sources": [
+            "swapchain.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no headless path: opens an ImGui/window swapchain (needs the gui module + a graphics backend)",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_swapchain_static",
+          "kind": "binary",
+          "sources": [
+            "swapchain_static.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no headless path: opens an ImGui/window swapchain (needs the gui module + a graphics backend)",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_win_hdr",
+          "kind": "binary",
+          "sources": [
+            "win_hdr.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui",
+            "dx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no; HDR swapchain window",
+          "notes": "cmake gates it on WIN32 AND LUISA_COMPUTE_ENABLE_DX inside the GUI block",
+          "headless": []
+        },
+        {
+          "name": "example_image_process",
+          "kind": "binary",
+          "sources": [
+            "image_process/main.cpp",
+            "image_process/image_process.cpp",
+            "image_process/headless_test.cpp"
+          ],
+          "deps": [],
+          "cmake_links": [
+            "comdlg32"
+          ],
+          "syslibs": [
+            "comdlg32"
+          ],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "`--headless` (gui/image_process/headless_test.cpp) processes the bundled images and writes results; the window path is interactive",
+          "notes": "comdlg32 is needed on windows only for the native open/save dialogs (xmake add_syslinks, cmake target_link_libraries); the generator should add the platform guard",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_procedural_tex",
+          "kind": "binary",
+          "sources": [
+            "procedural_tex/main.cpp",
+            "procedural_tex/noise_*.cpp"
+          ],
+          "deps": [],
+          "defines": [
+            {
+              "value": "LUISA_ENABLE_GUI",
+              "when": "gui"
+            }
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "headless by default: `procedural_tex <backend> --output-dir <dir>` renders every noise algorithm to disk; `--gui` opens one ImGui window per algorithm (only when gui is on)",
+          "notes": "the 'noise_*.cpp' wildcard comes from xmake add_files; the cmake file lists the same 17 files explicitly (noise_all.cpp + noise_*.cpp). LUISA_ENABLE_GUI is added only when the GUI module is enabled (both build systems); the target itself is built unconditionally",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_swapchain_wx",
+          "kind": "binary",
+          "sources": [
+            "swapchain_wx.cpp"
+          ],
+          "deps": [],
+          "cmake_links": [
+            "luisa-compute-gui-wx"
+          ],
+          "requires": [
+            "gui",
+            "wx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no; wxWidgets-hosted swapchain window",
+          "notes": "cmake only (no xmake target). cmake creates an INTERFACE target luisa-compute-gui-wx from the found wxWidgets (+GTK on unix) libs and links it; it is behind LUISA_COMPUTE_EXAMPLE_WX_INTEROP=ON and only exists when find_package(wxWidgets) succeeds",
+          "build_systems": [
+            "cmake"
+          ],
+          "requires_target": [
+            "luisa-compute-gui-wx"
+          ],
+          "headless_skip": "wxWidgets toolchain only"
+        },
+        {
+          "name": "example_swapchain_qt",
+          "kind": "binary",
+          "sources": [
+            "swapchain_qt.cpp"
+          ],
+          "deps": [],
+          "cmake_links": [
+            "Qt::Widgets",
+            "Qt::Core",
+            "Qt::Gui",
+            "Qt::GuiPrivate"
+          ],
+          "requires": [
+            "gui",
+            "qt"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no; Qt6-hosted swapchain window",
+          "notes": "cmake only (no xmake target), behind LUISA_COMPUTE_EXAMPLE_QT_INTEROP=ON; only configured when Qt6 Widgets/Core/Gui/GuiPrivate are found (skipped for clang on windows, needs the AGL framework on apple)",
+          "build_systems": [
+            "cmake"
+          ],
+          "requires_target": [
+            "Qt::Widgets",
+            "Qt::Core",
+            "Qt::Gui",
+            "Qt::GuiPrivate"
+          ],
+          "headless_skip": "Qt toolchain only"
+        }
+      ]
+    },
+    {
+      "dir": "compute",
+      "targets": [
+        {
+          "name": "example_helloworld",
+          "kind": "binary",
+          "sources": [
+            "helloworld.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `helloworld <backend>`; cmake registers `example_helloworld simd` as a test",
+          "headless": []
+        },
+        {
+          "name": "example_bindless_mip",
+          "kind": "binary",
+          "sources": [
+            "bindless_mip.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `bindless_mip <backend>`",
+          "notes": "cmake only (examples/CMakeLists.txt line 150); no xmake target",
+          "build_systems": [
+            "cmake"
+          ],
+          "headless": []
+        },
+        {
+          "name": "example_cluster_launch_control",
+          "kind": "binary",
+          "sources": [
+            "cluster_launch_control.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `cluster_launch_control <backend>`",
+          "headless_skip": "kernel lowers to SM 90+ PTX (cluster launch control); needs Hopper/Blackwell"
+        },
+        {
+          "name": "example_async_copy_prefetch",
+          "kind": "binary",
+          "sources": [
+            "async_copy_prefetch.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `async_copy_prefetch <backend>`",
+          "headless": [],
+          "headless_skip": {
+            "dx": "uses buffer_address() (raw device pointers), which the DX backend does not implement ('Bad op. BUFFER_ADDRESS')",
+            "vk": "uses buffer_address() (raw device pointers), which the VK backend does not implement ('Bad op. BUFFER_ADDRESS')"
+          }
+        },
+        {
+          "name": "example_software_lbvh",
+          "kind": "binary",
+          "sources": [
+            "software_lbvh.cpp",
+            "lbvh/*.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `software_lbvh <backend> [--no-compact] [--headroom <f>] [--keep-scratch]`, self-validates against the hardware RTX acceleration structures",
+          "notes": "the 'lbvh/*.cpp' wildcard comes from xmake; cmake lists lbvh_storage.cpp, lbvh_sort.cpp, blas.cpp, tlas.cpp, software_lbvh.cpp explicitly. The LBVH sources are shared by the bench/test targets",
+          "headless": []
+        },
+        {
+          "name": "example_software_lbvh_bench",
+          "kind": "binary",
+          "sources": [
+            "lbvh/bench/benchmark_lbvh.cpp",
+            "lbvh/*.cpp",
+            "lbvh/bench/bench_harness.cpp",
+            "lbvh/bench/bench_scenes.cpp",
+            "lbvh/bench/bench_stats.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; benchmark CLI `benchmark_lbvh <backend> [--scene ...] [--triangles N] [--rays N] [--iters N] [--budget-gib F] [--validate] ...`",
+          "notes": "wildcards taken from xmake; cmake lists the same files explicitly. Deliberately NOT mirrored as a test (it reports numbers instead of asserting)",
+          "headless": [
+            "--scene",
+            "worst",
+            "--max-seconds",
+            "5",
+            "--iters",
+            "1",
+            "--warmup",
+            "0"
+          ]
+        },
+        {
+          "name": "example_software_lbvh_sort_bench",
+          "kind": "binary",
+          "sources": [
+            "lbvh/bench/sort_bench.cpp",
+            "lbvh/*.cpp",
+            "lbvh/bench/bench_harness.cpp",
+            "lbvh/bench/bench_scenes.cpp",
+            "lbvh/bench/bench_stats.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; A/B sort harness `sort_bench <backend> [--method ...] [--base N] [--counts ...] [--measure|--bench]`",
+          "notes": "wildcards taken from xmake; cmake lists the same files explicitly; not mirrored as a test",
+          "headless": []
+        },
+        {
+          "name": "example_software_lbvh_test",
+          "kind": "binary",
+          "sources": [
+            "lbvh/test/lbvh_test.cpp",
+            "lbvh/*.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `lbvh_test <backend> [--verbose] [--seed n] [--quick]`, exits non-zero on the first failure",
+          "headless": []
+        },
+        {
+          "name": "example_image_processing",
+          "kind": "binary",
+          "sources": [
+            "image_processing.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "gui"
+          ],
+          "mirror_as_test": true,
+          "gui_dep": true,
+          "headless_hint": "`--offline` (luisa::ref::ExampleOptions in examples/common/reference_compare.h: `--spp N`, `--iterations N`, `--max-spp-per-dispatch N`, `--compare/-c <png>`); CMake's metal4 tests run e.g. `metal4 --offline --spp 1`",
+          "notes": "xmake builds it only with the GUI module enabled (gui_dep=true); the CMake file builds it outside the LUISA_COMPUTE_ENABLE_GUI guard",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_native_shader",
+          "kind": "binary",
+          "sources": [
+            "native_shader_examples/native_shader.cpp",
+            "native_shader_examples/native_shader_dispatch.cpp",
+            "native_shader_examples/native_shader_runtime.cpp"
+          ],
+          "deps": [
+            "lc-yyjson"
+          ],
+          "defines": [
+            {
+              "value": "LUISA_ENABLE_GUI",
+              "when": "gui"
+            }
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "`--offline` or `--self-test` with a JSON dispatch document (e.g. native_shader_examples/simple_add.json); verifies results on the host. `mode.interactive` in the document needs the gui module",
+          "notes": "xmake depends on lc-yyjson unless lc_yyjson_use_xrepo is on, in which case it add_packages('yyjson') instead (i.e. the dependency must be conditional on the yyjson_xrepo condition key); the cmake file adds no explicit link at all and gets yyjson through the luisa::compute umbrella. LUISA_ENABLE_GUI is added only when gui is on",
+          "headless_skip": {
+            "cuda": "NVRTC PTX rejected by the installed driver (CUDA 13.5 toolkit vs older driver)"
+          },
+          "headless": []
+        },
+        {
+          "name": "example_native_shader_minimal",
+          "kind": "binary",
+          "sources": [
+            "native_shader_examples/minimal.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments - compiles one native kernel, dispatches it, verifies, exits non-zero on failure",
+          "notes": "minimal companion of example_native_shader (one TU, no dispatch document, no gui)",
+          "headless_skip": {
+            "cuda": "NVRTC PTX rejected by the installed driver (CUDA 13.5 toolkit vs older driver)"
+          },
+          "headless": []
+        },
+        {
+          "name": "example_gdeflate",
+          "kind": "binary",
+          "sources": [
+            "compact/*.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `gdeflate <backend> [size] [repeat]` (compute/compact/main.cpp)",
+          "notes": "xmake add_files('*.cpp') in examples/compute/compact (no open(...) guard); cmake lists compute/compact/main.cpp + gdeflate.cpp explicitly. Only this one target comes from that directory (compute/compact has an xmake.lua but no CMakeLists.txt)",
+          "headless": []
+        },
+        {
+          "name": "tokenizer",
+          "kind": "binary",
+          "sources": [
+            "tokenize/*.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `tokenizer <backend> [--test]` - the --test path runs the Boost.UT suite",
+          "notes": "xmake add_files('*.cpp') in examples/compute/tokenize; cmake lists the same 10 files explicitly including test_tokenize.cpp and benchmark_tokenize.cpp. The cmake file deliberately adds NO extra target_link_libraries (linking the luisa-compute-vstl OBJECT library would bake the LMDB objects into the exe)",
+          "headless": []
+        }
+      ]
+    },
+    {
+      "dir": "tensor",
+      "targets": [
+        {
+          "name": "example_tensor",
+          "kind": "binary",
+          "sources": [
+            "main.cpp",
+            "tensor_kernels.cpp",
+            "kernel_*.cpp",
+            "poly_fit.cpp",
+            "poly_fit_kernels.cpp",
+            "linear_regression.cpp",
+            "linear_regression_kernels.cpp",
+            "mlp.cpp",
+            "mnist.cpp",
+            "cnn_inference.cpp",
+            "cnn_kernels.cpp",
+            "rnn.cpp",
+            "tensor_basics.cpp"
+          ],
+          "deps": [
+            "lc-tile"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `<backend>` plus per-demo flags, e.g. `tensor_basics --basics`, `poly_fit --poly-fit [--steps N]`, `mnist --mnist [--epochs N]`, `rnn --rnn [--epochs N]`",
+          "notes": "subcommand tool that also runs a 36-case tile self-test; the CUDA backend needs the TIRx bridge for tile::compile",
+          "headless": [],
+          "headless_skip": {
+            "cuda": "the TileIR kernels need the optional TIRx bridge on the CUDA backend (lc_tile_tirx_bridge / LUISA_COMPUTE_ENABLE_TILE_TIRX_BRIDGE), which is off in this configuration"
+          }
+        }
+      ]
+    },
+    {
+      "dir": "ml",
+      "targets": [
+        {
+          "name": "example_multi_head_attention",
+          "kind": "binary",
+          "sources": [
+            "multi_head_attention.cpp",
+            "attention_kernels.cpp",
+            "attention_host_data.cpp",
+            "attention_cpu_reference.cpp",
+            "attention_runner.cpp",
+            "paged_attention.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": true,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `multi_head_attention <backend> [use_mla=1] [cooperative_vector=0] [use_paged=0]`, validates against the CPU reference in attention_cpu_reference.cpp",
+          "headless": []
+        }
+      ]
+    },
+    {
+      "dir": "coro",
+      "targets": [
+        {
+          "name": "example_coro_external_stage_debug",
+          "kind": "binary",
+          "sources": [
+            "external_stage_debug.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `<backend>` (cmake metal test runs `example_coro_external_stage_debug metal`)",
+          "notes": "xmake gates these on lc_enable_xir and adds lc-coro (coro_example_proj wrapper); the cmake file builds them unconditionally and links no explicit coro target. CMake registers metal/metal4 integration tests for them",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_coro_external_stage_neural_sdf",
+          "kind": "binary",
+          "sources": [
+            "external_stage_neural_sdf.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `<backend> [--test]` (cmake metal test runs `metal --test`)",
+          "notes": "xmake gates these on lc_enable_xir and adds lc-coro (coro_example_proj wrapper); the cmake file builds them unconditionally and links no explicit coro target. CMake registers metal/metal4 integration tests for them",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        },
+        {
+          "name": "example_coro_on_demand_texture",
+          "kind": "binary",
+          "sources": [
+            "on_demand_texture.cpp"
+          ],
+          "deps": [
+            "lc-coro"
+          ],
+          "requires": [
+            "xir"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `<backend> [--test]` (cmake metal4 test runs `metal4 --test`)",
+          "notes": "xmake gates these on lc_enable_xir and adds lc-coro (coro_example_proj wrapper); the cmake file builds them unconditionally and links no explicit coro target. CMake registers metal/metal4 integration tests for them",
+          "headless": [
+            "--frames",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "dir": "extension",
+      "targets": [
+        {
+          "name": "example_dstorage",
+          "kind": "binary",
+          "sources": [
+            "dstorage.cpp"
+          ],
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `dstorage <backend>` where backend is cuda/dx/vk/metal; the demo skips itself when the DStorageExt is unavailable",
+          "notes": "condition is a DISJUNCTION in both build systems (dx OR vk OR cuda OR metal backend enabled) which the AND-only 'requires' list cannot express: keep requires empty and gate on (dx||vk||cuda||metal). xmake: if lc_dx_backend or lc_vk_backend or lc_cuda_backend or lc_metal_backend",
+          "requires_any": [
+            "dx",
+            "vk",
+            "cuda",
+            "metal"
+          ],
+          "headless": []
+        },
+        {
+          "name": "example_dml",
+          "kind": "binary",
+          "sources": [
+            "dml.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments, always creates the dx device and runs DirectML on it",
+          "headless": [],
+          "notes": "creates its own DX/DirectML device; argv[1] only tags the run"
+        },
+        {
+          "name": "example_supersampling",
+          "kind": "binary",
+          "sources": [
+            "supersampling.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx",
+            "gui"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no: presents a swapchain window (`supersampling <backend>`, backend is dx only)",
+          "headless": [],
+          "notes": "headless path prints \"not yet implemented\" and exits"
+        },
+        {
+          "name": "example_path_tracing_clangcxx",
+          "kind": "binary",
+          "sources": [
+            "path_tracing_clangcxx.cpp"
+          ],
+          "deps": [
+            "lc-clangcxx"
+          ],
+          "requires": [
+            "gui",
+            "clangcxx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": true,
+          "headless_hint": "no: GUI window (`path_tracing_clangcxx <backend>` only). The clang-cxx shading language sources it compiles at runtime live in examples/extension/cxx_shaders",
+          "notes": "xmake: only when mode != debug and lc_enable_clangcxx, and it includes extension/clangcxx_compiler; cmake: only when LUISA_COMPUTE_ENABLE_CLANG_CXX, outside the GUI guard, and it does NOT build clangcxx_compiler ('xmake-only')",
+          "headless_skip": "needs LUISA_COMPUTE_ENABLE_CLANG_CXX"
+        },
+        {
+          "name": "example_cuda_lcub",
+          "kind": "binary",
+          "sources": [
+            "cuda_lcub.cpp"
+          ],
+          "deps": [
+            "lc-compute-cuda-ext-lcub"
+          ],
+          "cmake_links": [
+            "CUDA::cudart",
+            "CUDA::cuda_driver"
+          ],
+          "requires": [
+            "cuda",
+            "cuda_ext_lcub"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments, hard-codes the cuda device and runs a device-wide scan vs the host",
+          "headless_skip": "needs LUISA_COMPUTE_ENABLE_CUDA_EXT_LCUB"
+        },
+        {
+          "name": "example_dx_supersampling",
+          "kind": "binary",
+          "sources": [
+            "dx_supersampling.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "partly: `dx_supersampling` has no argument besides none (dx device + window); with neither the FSR nor the Intel XeSS SDK available the TU compiles to a stub that prints 'Skipping' and returns 0",
+          "notes": "cmake only - the matching xmake example_proj call is commented out in examples/xmake.lua ('-- example_proj(\"example_dx_supersampling\"...)'). Sources include <ffx_fsr2.h>/<xess/xess_d3d12.h> behind #ifdef",
+          "build_systems": [
+            "cmake"
+          ],
+          "headless_skip": "needs the FSR2/XeSS SDKs at build time; without them the headless run prints \"skipping\""
+        },
+        {
+          "name": "example_fsr3",
+          "kind": "binary",
+          "sources": [
+            "fsr3.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "partly: `fsr3 [--frame_gen]`; without the FidelityFX SDK the TU is a stub printing 'fsr3: FidelityFX SDK not found. Skipping.' and returning 0",
+          "notes": "cmake only (no xmake target)",
+          "build_systems": [
+            "cmake"
+          ],
+          "headless_skip": "needs the FidelityFX SDK at build time; without it the headless run prints \"skipping\""
+        },
+        {
+          "name": "clangcxx_compiler",
+          "kind": "binary",
+          "sources": [
+            "clangcxx_compiler/*.cpp"
+          ],
+          "deps": [
+            "lc-clangcxx",
+            "reproc"
+          ],
+          "requires": [
+            "clangcxx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI compiler driver: `<src file|dir> [...]` compiles a .lang.cpp program with lc-clangcxx + reproc",
+          "notes": "xmake only (the cmake file says 'clangcxx_compiler is xmake-only; no CMake target available'). xmake sets enable_exception=true, forces an 8 MiB stack (/STACK:8388608 or -Wl,--stack,8388608) and, after_build on windows, copies clangcxx_compiler.exe + dxcompiler.dll + dxil.dll + luisa-clangcxx.dll + luisa-core.dll + luisa-runtime.dll (+ backend dlls) into build/clangcxx_compiler. It also needs the non-source assets extension/clangcxx_compiler/template.txt and simplecpp.{h,cpp}. Unlike example_proj targets it does NOT depend on lc-dsl",
+          "build_systems": [
+            "xmake"
+          ],
+          "headless_skip": "compiler tool, needs CLANG_CXX"
+        }
+      ]
+    },
+    {
+      "dir": "dx",
+      "targets": [
+        {
+          "name": "example_dx_custom_sdk",
+          "kind": "binary",
+          "sources": [
+            "custom_sdk/custom_sdk.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments, creates a dx device through the CustomSDKConfig extension",
+          "notes": "creates its own DX device with a private Agility SDK copy; argv[1] only tags the run",
+          "build_systems": [
+            "cmake"
+          ],
+          "headless": []
+        }
+      ]
+    },
+    {
+      "dir": "interop",
+      "targets": [
+        {
+          "name": "example_cuda_dx_interop",
+          "kind": "binary",
+          "sources": [
+            "cuda_dx_interop.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "dx_cuda_interop"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments, creates a dx device plus a cuda device from the DxCudaInterop ext",
+          "notes": "creates its own CUDA and DX devices; argv[1] only tags the run",
+          "headless": []
+        },
+        {
+          "name": "example_cuda_vk_interop",
+          "kind": "binary",
+          "sources": [
+            "cuda_vk_interop.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "vk_cuda_interop",
+            "cuda"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; no arguments, external vk device + cuda device through VkCudaInterop",
+          "headless": [],
+          "notes": "creates its own CUDA and VK devices; argv[1] only tags the run"
+        },
+        {
+          "name": "example_cuda_vk_kernel_launch",
+          "kind": "binary",
+          "sources": [
+            "cuda_vk_kernel_launch.cpp"
+          ],
+          "deps": [],
+          "requires": [
+            "vk_cuda_interop",
+            "cuda"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; optional `<backend>` argument (default 'vk'); kernels are DSL-compiled on the paired cuda device and imported into the VK extension",
+          "headless": [],
+          "notes": "creates its own CUDA and VK devices; argv[1] only tags the run"
+        }
+      ]
+    },
+    {
+      "dir": "embedding",
+      "targets": [
+        {
+          "name": "lc-example-embedding",
+          "kind": "static",
+          "sources": [
+            "embed/*.cpp",
+            "embed/kernels/*.cpp"
+          ],
+          "deps": [
+            "lc-yyjson"
+          ],
+          "includes": [
+            "$LC/src/ext/yyjson/src",
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library, no entry point (test_embed_* binaries live in src/tests)",
+          "notes": "wildcards come from xmake (embed/*.cpp, embed/kernels/*.cpp); cmake lists the 20 files explicitly. xmake: lc-yyjson when bundled, add_packages('yyjson') when lc_yyjson_use_xrepo is on (make the dependency conditional on the yyjson_xrepo condition key); cmake: links luisa-compute-ext-yyjson-interface (PUBLIC). cmake sets POSITION_INDEPENDENT_CODE on UNIX so the archive can be linked into example_embed_retrieval_lib; include dirs are PUBLIC in both ($GROUP and $SRC)"
+        },
+        {
+          "name": "example_embed_pack_model",
+          "kind": "binary",
+          "sources": [
+            "tools/pack_model.cpp"
+          ],
+          "deps": [],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "host-only CLI: packs ONNX/.pt checkpoints into model.bgm; no device needed",
+          "notes": "both build files give it include dirs only - it does NOT link lc-example-embedding (it only links the luisa::compute umbrella in cmake)",
+          "headless_skip": "needs model checkpoints"
+        },
+        {
+          "name": "example_embed_retrieval_lib",
+          "kind": "shared",
+          "sources": [
+            "api/*.cpp"
+          ],
+          "headers": [
+            "api/*.h"
+          ],
+          "deps": [
+            "lc-example-embedding"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP",
+            "$GROUP/api"
+          ],
+          "defines": [
+            {
+              "value": "EXAMPLE_EMBED_RETRIEVAL_LIB_BUILD",
+              "when": null
+            }
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "shared library with a documented C ABI (no entry point); driven by a host FFI and by example_embed_retrieval",
+          "notes": "xmake: project_kind=shared, add_files('api/*.cpp') + add_headerfiles('api/*.h'); cmake: add_library(... SHARED api/example_embed_retrieval_lib.cpp) with the api/ dir PUBLIC. The EXAMPLE_EMBED_RETRIEVAL_LIB_BUILD define is set by both",
+          "headless_skip": "shared library, no entry point"
+        },
+        {
+          "name": "example_embed_retrieval",
+          "kind": "binary",
+          "sources": [
+            "example_embed_retrieval.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding"
+          ],
+          "cmake_links": [
+            "ws2_32"
+          ],
+          "syslibs": [
+            "ws2_32"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; interactive retrieval REPL that also speaks newline-delimited JSON-RPC on stdin/stdout (that is the scriptable path)",
+          "notes": "ws2_32 on windows only (xmake add_syslinks('ws2_32'), cmake target_link_libraries(... ws2_32) under if(WIN32)) - the generator should add the platform guard",
+          "headless_skip": "interactive REPL"
+        },
+        {
+          "name": "example_embed_dump_golden",
+          "kind": "binary",
+          "sources": [
+            "tools/dump_golden.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "host dev tool: dumps golden intermediates from a packed model.bgm",
+          "headless_skip": "needs model.bgm"
+        },
+        {
+          "name": "example_embed_text",
+          "kind": "binary",
+          "sources": [
+            "example_embed_text.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI that encodes sentences from the command line with a packed model",
+          "headless_skip": "needs model.bgm"
+        }
+      ]
+    },
+    {
+      "dir": "embedding_mm",
+      "targets": [
+        {
+          "name": "lc-example-embedding-mm",
+          "kind": "static",
+          "sources": [
+            "embed/*.cpp",
+            "embed/ops/*.cpp",
+            "embed/models/*.cpp"
+          ],
+          "deps": [
+            "lc-yyjson"
+          ],
+          "includes": [
+            "$LC/src/ext/yyjson/src",
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library, no entry point",
+          "notes": "wildcards come from xmake; cmake lists the 16 files explicitly. xmake: lc-yyjson when bundled, add_packages('yyjson') when lc_yyjson_use_xrepo is on (make the dependency conditional on the yyjson_xrepo condition key); cmake: links luisa-compute-ext-yyjson-interface (PUBLIC)"
+        },
+        {
+          "name": "example_embed_mm_pack_model",
+          "kind": "binary",
+          "sources": [
+            "tools/pack_model.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "host-only CLI weight packer (no device needed)",
+          "headless_skip": "needs model checkpoints"
+        },
+        {
+          "name": "example_embed_mm_text",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_text.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI demo/encoder",
+          "headless_skip": "needs model.bgm"
+        },
+        {
+          "name": "example_embed_mm_test",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_test.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI self-check tool",
+          "headless": []
+        },
+        {
+          "name": "example_embed_mm_vision",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_vision.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI demo/encoder",
+          "headless_skip": "needs model.bgm"
+        },
+        {
+          "name": "example_embed_mm_audio",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_audio.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI demo/encoder",
+          "headless_skip": "needs model.bgm"
+        },
+        {
+          "name": "example_embed_mm_video",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_video.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI demo/encoder",
+          "headless_skip": "needs model.bgm"
+        },
+        {
+          "name": "example_embed_mm_bench",
+          "kind": "binary",
+          "sources": [
+            "example_embed_mm_bench.cpp"
+          ],
+          "deps": [
+            "lc-example-embedding-mm"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; CLI benchmark",
+          "headless_skip": "needs model.bgm"
+        }
+      ]
+    },
+    {
+      "dir": "ocr",
+      "targets": [
+        {
+          "name": "lc-example-ocr",
+          "kind": "static",
+          "sources": [
+            "ocr/*.cpp",
+            "ocr/output/*.cpp",
+            "ocr/runtime/*.cpp",
+            "ocr/ops/*.cpp",
+            "ocr/models/*.cpp"
+          ],
+          "deps": [
+            "lc-yyjson"
+          ],
+          "includes": [
+            "$LC/src/ext/yyjson/src",
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library, no entry point (tests live in src/tests/unit/ocr)",
+          "notes": "wildcards come from xmake; cmake lists ~90 files explicitly. xmake: lc-yyjson when bundled, add_packages('yyjson') when lc_yyjson_use_xrepo is on (make the dependency conditional on the yyjson_xrepo condition key); cmake: links luisa-compute-ext-yyjson-interface (PUBLIC). cmake also links luisa-compute-ext-stb (and luisa-compute-ext-yyjson-interface when that target exists); xmake relies on the stb-image dep. PUBLIC include dirs: $GROUP and $SRC"
+        },
+        {
+          "name": "example_ocr",
+          "kind": "binary",
+          "sources": [
+            "example_ocr.cpp"
+          ],
+          "deps": [
+            "lc-example-ocr"
+          ],
+          "includes": [
+            "$SRC",
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; the CLI is fail-closed and prints structured output; runs fully headless (`example_ocr <args>`)",
+          "headless_skip": "needs an OCR model package"
+        },
+        {
+          "name": "lc-example-ocr-bench",
+          "kind": "static",
+          "sources": [
+            "bench/*.cpp"
+          ],
+          "deps": [
+            "lc-example-ocr"
+          ],
+          "includes": [
+            "$GROUP",
+            "$TESTS/integration/ocr"
+          ],
+          "defines": [
+            {
+              "value": "LUISA_OCR_BENCHMARK_SOURCE_REVISION=unknown",
+              "when": null
+            },
+            {
+              "value": "LUISA_OCR_TEST_DATA_DIR=\"$TESTS/data/ocr\"",
+              "when": null
+            },
+            {
+              "value": "LUISA_OCR_EXAMPLES_DIR=\"$SRC\"",
+              "when": null
+            }
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library; only the benchmark fixtures (device-side bench kernels)",
+          "notes": "xmake: add_files('bench/*.cpp'), includes src/tests + src/tests/integration/ocr privately, and defines LUISA_OCR_BENCHMARK_SOURCE_REVISION from $LUISA_OCR_SOURCE_REVISION (default 'unknown', whitespace stripped) plus absolute LUISA_OCR_TEST_DATA_DIR / LUISA_OCR_EXAMPLES_DIR paths. cmake takes the revision from `git rev-parse HEAD` and the same absolute paths. The three defines must be regenerated from the new root; the JSON shows the token form and a safe default"
+        },
+        {
+          "name": "example_ocr_bench",
+          "kind": "binary",
+          "sources": [
+            "example_ocr_bench.cpp"
+          ],
+          "deps": [
+            "lc-example-ocr-bench"
+          ],
+          "includes": [
+            "$GROUP"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; benchmark driver CLI (prints a report)",
+          "headless_skip": "needs an OCR model package"
+        }
+      ]
+    },
+    {
+      "dir": "ntc",
+      "targets": [
+        {
+          "name": "luisa-ntc",
+          "kind": "static",
+          "sources": [
+            "src/core/*.cpp",
+            "src/infer/*.cpp",
+            "src/bcn/*.cpp",
+            "src/train/*.cpp"
+          ],
+          "deps": [
+            "lc-yyjson"
+          ],
+          "includes": [
+            "$GROUP/include",
+            "$GROUP/include/libntc",
+            "$SRC",
+            "$LC/src/ext/yyjson/src",
+            "$LC/src/ext/stb"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library, no entry point",
+          "notes": "wildcards come from xmake; cmake lists the same 7 files explicitly. xmake: lc-yyjson when bundled, add_packages('yyjson') when lc_yyjson_use_xrepo is on (make the dependency conditional on the yyjson_xrepo condition key); cmake: links luisa-compute-ext-yyjson-interface (PUBLIC). cmake links luisa-compute-ext-stb-interface additionally; include dirs are PUBLIC in both"
+        },
+        {
+          "name": "luisa_ntc_cli",
+          "kind": "binary",
+          "sources": [
+            "tools/luisa_ntc_cli.cpp"
+          ],
+          "deps": [
+            "luisa-ntc"
+          ],
+          "includes": [
+            "$GROUP/include",
+            "$GROUP/include/libntc",
+            "$SRC",
+            "$LC/src/ext/yyjson/src",
+            "$LC/src/ext/stb"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `luisa_ntc_cli --compress/--decompress/--describe ...`",
+          "headless_skip": "needs NTC textures"
+        },
+        {
+          "name": "luisa_ntc_bench",
+          "kind": "binary",
+          "sources": [
+            "tools/luisa_ntc_bench.cpp"
+          ],
+          "deps": [
+            "luisa-ntc"
+          ],
+          "includes": [
+            "$GROUP/include",
+            "$GROUP/include/libntc",
+            "$SRC",
+            "$LC/src/ext/yyjson/src",
+            "$LC/src/ext/stb"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; `luisa_ntc_bench <ntc file> [--backend cuda] [--iterations N]`",
+          "headless_skip": "needs NTC textures"
+        },
+        {
+          "name": "luisa_ntc_test",
+          "kind": "binary",
+          "sources": [
+            "tools/luisa_ntc_test.cpp"
+          ],
+          "deps": [
+            "luisa-ntc"
+          ],
+          "includes": [
+            "$GROUP/include",
+            "$GROUP/include/libntc",
+            "$SRC",
+            "$LC/src/ext/yyjson/src",
+            "$LC/src/ext/stb"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI; parity/compatibility test binary, prints a report and returns non-zero on failure",
+          "headless_skip": "needs NTC textures"
+        },
+        {
+          "name": "luisa_ntc_viewer",
+          "kind": "binary",
+          "sources": [
+            "tools/luisa_ntc_viewer.cpp"
+          ],
+          "deps": [
+            "luisa-ntc"
+          ],
+          "includes": [
+            "$GROUP/include",
+            "$GROUP/include/libntc",
+            "$SRC",
+            "$LC/src/ext/yyjson/src",
+            "$LC/src/ext/stb"
+          ],
+          "defines": [
+            {
+              "value": "LUISA_ENABLE_GUI",
+              "when": "gui"
+            }
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "no GUI-free mode: opens an ImGui window (`luisa_ntc_viewer <ntc file> [--backend cuda]`)",
+          "notes": "built unconditionally by both build systems; when the GUI module is on it additionally links lc-gui (xmake: is_gui && lc_enable_gui; cmake: if(LUISA_COMPUTE_ENABLE_GUI)) and defines LUISA_ENABLE_GUI. This is the only ntc target with a GUI, so gui_dep is false but the conditional dep/define still has to be emitted for 'when: gui'",
+          "headless_skip": "needs NTC textures + GUI"
+        }
+      ]
+    },
+    {
+      "dir": "ios",
+      "targets": [
+        {
+          "name": "example_ios_path_tracing",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle; runs on a device/simulator through Metal4)",
+          "notes": "ios only: MACOSX_BUNDLE from ios/metal4_path_tracing/{main.mm,Info.plist.in} + src/tests/ios/metal4_device_conformance.{cpp,h} + examples/rendering/path_tracing.cpp, BUNDLE_ID org.luisa-compute.metal4-path-tracer. It is the only target of luisa_compute_add_ios_metal4_path_tracing_bundle() and sets LUISA_TEST_MIRROR to luisa-metal4-ios-device-air-path-tracer when that target exists",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_camera",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_camera' ('Path Tracing Camera') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-camera",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_cutout",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_cutout' ('Path Tracing Cutout') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-cutout",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_hdr",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_hdr' ('Path Tracing HDR') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-hdr",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_nested_callable",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_nested_callable' ('Path Tracing Nested Callable') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-nested-callable",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_ray_masks",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_ray_masks' ('Path Tracing Ray Masks') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-ray-masks",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_spectrum",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_spectrum' ('Path Tracing Spectrum') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-spectrum; additionally embeds SRGBToFourierEvenPacked.dat with a host-built luisa_embed_device_lib",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_xir2ast",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_path_tracing_xir2ast' ('Path Tracing XIR to AST') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.path-tracing-xir2ast; built unconditionally (no xir guard)",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_photon_mapping",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_photon_mapping' ('Photon Mapping') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.photon-mapping",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_sdf_renderer",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_sdf_renderer' ('SDF Renderer') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.sdf-renderer",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_sdf_renderer_xir2ast",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_sdf_renderer_xir2ast' ('SDF Renderer XIR to AST') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.sdf-renderer-xir2ast; built unconditionally (no xir guard)",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_blackhole",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_blackhole' ('Black Hole') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.blackhole",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_voxel_raytracer",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_voxel_raytracer' ('Voxel Ray Tracer') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.voxel-raytracer",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_procedural",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_procedural' ('Procedural Ray Tracing') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.procedural",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_shader_toy",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_shader_toy' ('Shader Toy') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.shader-toy",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_shader_toy_spacex",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_shader_toy_spacex' ('Shader Toy SpaceX') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.shader-toy-spacex",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_shader_visuals_present",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_shader_visuals_present' ('Shader Visuals') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.shader-visuals-present",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_coro_path_tracing",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_coro_path_tracing' ('Coroutine Path Tracing') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.coro-path-tracing; links luisa-compute-coro (target name pattern ^coro_)",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_coro_sdf_renderer",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle)",
+          "notes": "ios only: app bundle 'example_ios_coro_sdf_renderer' ('Coroutine SDF Renderer') from ios/common/rendering_example_host.mm + a configure_file'd rendering_example_entry.cpp that includes the desktop source - BUNDLE_ID org.luisa-compute.examples.ios.coro-sdf-renderer; links luisa-compute-coro (target name pattern ^coro_)",
+          "ios_only": true
+        },
+        {
+          "name": "example_ios_path_tracing_benchmark",
+          "kind": "binary",
+          "deps": [],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "n/a (iOS app bundle, runs a benchmark loop on device)",
+          "notes": "ios only: from examples/ios/benchmark/CMakeLists.txt (added by the top-level CMakeLists, not by examples/CMakeLists.txt); MACOSX_BUNDLE main.mm + examples/rendering/path_tracing.cpp, backend selected by LUISA_COMPUTE_IOS_BENCHMARK_BACKEND (metal or metal4)",
+          "ios_only": true
+        }
+      ]
+    }
+  ]
+}

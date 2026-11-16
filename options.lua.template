@@ -1,0 +1,49 @@
+-- LuisaComputeGallery local options template.
+--
+--   cp options.lua.template options.lua
+--
+-- `options.lua` is machine-local and git-ignored. It is included at the very
+-- beginning of the root xmake.lua (and, for CMake, `cmake/options.cmake` plays
+-- the same role - see docs/build.md), so everything declared here wins over the
+-- defaults in xmake.lua / CMakeLists.txt and loses to explicit command line
+-- flags.
+
+-- ---------------------------------------------------------------------------
+-- LC_DIR: where the LuisaCompute source tree lives.
+--
+-- Default (xmake.lua): "thirdparty/LuisaCompute"  - the git submodule.
+--
+-- Point it anywhere else to build against an existing checkout, a sibling
+-- clone, or a symlink to one. Relative paths are resolved against this file's
+-- directory; use forward slashes on Windows.
+-- ---------------------------------------------------------------------------
+LC_DIR = "LuisaCompute"
+
+-- ---------------------------------------------------------------------------
+-- lc_options: LuisaCompute build options (see `xmake show -l options` inside
+-- the LuisaCompute tree). Every key is applied with set_config(), so
+-- `xmake f --lc_dx_backend=n` still overrides the value below.
+-- ---------------------------------------------------------------------------
+lc_options = {
+    lc_enable_dsl = true,
+    lc_enable_gui = true,
+    lc_enable_imgui = true,
+    lc_enable_tests = false, -- LuisaCompute's own tests (the gallery owns its tests)
+    lc_enable_py = false,
+    lc_disable_win_message_box = true,
+
+    -- backends
+    lc_cuda_backend = true,
+    lc_dx_backend = true,
+    lc_vk_backend = true,
+    lc_metal_backend = true, -- silently disabled outside macOS
+    -- lc_fallback_backend = true, -- needs lc_llvm_path + lc_embree_path
+
+    -- compile speed
+    lc_enable_unity_build = true,
+    lc_enable_pch = true,
+
+    -- optional SDK/LLVM locations
+    -- lc_llvm_path = "C:/Program Files/LLVM",
+    -- lc_sdk_dir = "",  -- empty string: never download the DX/VK SDKs
+}

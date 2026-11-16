@@ -19,3 +19,11 @@ lc_options.generated.lua
 /compute
 .scripts
 /data
+# local build configuration (LC_DIR / lc_options), see options.lua.template
+options.lua
+cmake/options.cmake
+# local symlink/clone of the LuisaCompute tree (the submodule lives in thirdparty/)
+/LuisaCompute
+/build-cmake*
+/thirdparty/LuisaCompute/
+.kimix_cache

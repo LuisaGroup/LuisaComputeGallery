@@ -1,0 +1,15 @@
+# LuisaCompute itself is a submodule: the gallery builds it from source.
+#
+#   git submodule update --init thirdparty/LuisaCompute
+#
+# A local clone/symlink can be used instead by setting LC_DIR in the
+# git-ignored options.lua (xmake) or cmake/options.cmake (CMake).
+[submodule "thirdparty/LuisaCompute"]
+	path = thirdparty/LuisaCompute
+	url = https://github.com/LuisaGroup/LuisaCompute.git
+	branch = next
+	# Opt-in only: the tree carries ~17 nested submodules. `update = none`
+	# keeps plain `git submodule update --init` from pulling them; fetch them
+	# explicitly when a build needs the bundled third-party sources.
+	update = none
+	shallow = true

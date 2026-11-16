@@ -1,0 +1,44 @@
+# LuisaComputeGallery local CMake options template.
+#
+#   cp cmake/options.cmake.template cmake/options.cmake
+#
+# `cmake/options.cmake` is machine-local and git-ignored; the root CMakeLists.txt
+# includes it before anything else. It plays the same role as options.lua does
+# for the xmake build.
+#
+# Every entry is written in the `set(VAR <value> CACHE <TYPE> "<doc>")` form:
+# without FORCE an existing cache entry (a -D flag, or the value from a previous
+# configure) wins, so `cmake -DGALLERY_LC_MODE=submodule ...` still overrides this
+# file. Add FORCE to an entry when this file should always win.
+
+# ---------------------------------------------------------------------------
+# Which LuisaCompute tree to build against.
+#
+#   submodule  thirdparty/LuisaCompute (the git submodule, default)
+#   external   GALLERY_LC_DIR below (sibling clone, symlink, CI checkout, ...)
+#   package    find_package(LuisaCompute CONFIG) against an installed SDK
+# ---------------------------------------------------------------------------
+set(GALLERY_LC_MODE "external" CACHE STRING "submodule | external | package")
+set(GALLERY_LC_DIR "LuisaCompute" CACHE PATH
+        "LuisaCompute source tree (relative paths are resolved against the gallery root)")
+
+# ---------------------------------------------------------------------------
+# LuisaCompute options. They are declared with option() by LuisaCompute itself;
+# pre-seeding the cache here is equivalent to passing -DLUISA_COMPUTE_...=...
+# ---------------------------------------------------------------------------
+set(LUISA_COMPUTE_ENABLE_DSL ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_GUI ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_CUDA ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_DX ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_VULKAN ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_METAL ON CACHE BOOL "")
+set(LUISA_COMPUTE_ENABLE_FALLBACK OFF CACHE BOOL "needs LLVM + Embree")
+set(LUISA_COMPUTE_BUILD_TESTS OFF CACHE BOOL "LuisaCompute's own test suite")
+
+# ---------------------------------------------------------------------------
+# Gallery targets
+# ---------------------------------------------------------------------------
+set(GALLERY_BUILD_EXAMPLES ON CACHE BOOL "examples moved out of LuisaCompute")
+set(GALLERY_BUILD_TESTS ON CACHE BOOL "gallery tests")
+set(GALLERY_BUILD_APP ON CACHE BOOL "gallery.exe viewer")
+set(GALLERY_TEST_BACKEND "cuda" CACHE STRING "backend used by ctest -R headless")

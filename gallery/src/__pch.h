@@ -1,7 +1,10 @@
 #pragma once
+// Precompiled header for the GalleryRT library: the LuisaCompute headers
+// the gallery runtime pulls in everywhere. Regenerate with scripts/gen_pch.py when
+// LuisaCompute headers move or disappear.
+#pragma once
 #include <luisa/core/basic_traits.h>
 #include <luisa/core/basic_types.h>
-#include <luisa/core/binary_buffer.h>
 #include <luisa/core/binary_file_stream.h>
 #include <luisa/core/binary_io.h>
 #include <luisa/core/clock.h>
@@ -11,7 +14,6 @@
 #include <luisa/core/dynamic_module.h>
 #include <luisa/core/fiber.h>
 #include <luisa/core/first_fit.h>
-
 #include <luisa/core/intrin.h>
 #include <luisa/core/logging.h>
 #include <luisa/core/macro.h>
@@ -24,7 +26,6 @@
 #include <luisa/core/stl.h>
 #include <luisa/core/string_scratch.h>
 #include <luisa/core/thread_safety.h>
-
 #include <luisa/runtime/bindless_array.h>
 #include <luisa/runtime/buffer.h>
 #include <luisa/runtime/buffer_arena.h>
@@ -44,8 +45,6 @@
 #include <luisa/runtime/raster/raster_state.h>
 #include <luisa/runtime/raster/vertex_attribute.h>
 #include <luisa/runtime/raster/viewport.h>
-#include <luisa/runtime/remote/client_interface.h>
-#include <luisa/runtime/remote/server_interface.h>
 #include <luisa/runtime/rhi/argument.h>
 #include <luisa/runtime/rhi/command.h>
 #include <luisa/runtime/rhi/command_encoder.h>
@@ -75,7 +74,6 @@
 #include <luisa/runtime/stream_event.h>
 #include <luisa/runtime/swapchain.h>
 #include <luisa/runtime/volume.h>
-
 #include <luisa/vstl/allocate_type.h>
 #include <luisa/vstl/arena_hash_map.h>
 #include <luisa/vstl/common.h>
