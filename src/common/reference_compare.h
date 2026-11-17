@@ -18,6 +18,8 @@
 #include <luisa/core/stl/optional.h>
 #include <luisa/core/stl/string.h>
 
+#include "common/image_io.h"
+
 namespace luisa::ref {
 
 static constexpr double DEFAULT_PSNR_THRESHOLD = 30.0;
@@ -46,6 +48,12 @@ struct ExampleOptions {
     /// Directory the headless path writes images/reports into.
     /// "--headless" is accepted as a synonym for "--offline".
     luisa::filesystem::path output_dir{"."};
+    /// `--capture <path>` (alias: `--screenshot <path>`): write the rendered
+    /// result to exactly this file instead of `<output_dir>/<default name>`.
+    /// The container follows the extension - png, jpg/jpeg, bmp or tga - and is
+    /// written through common/image_io.h (stb_image_write). Like `--compare`,
+    /// asking for a capture implies the offline/headless path.
+    luisa::optional<luisa::filesystem::path> capture_path;
     uint32_t spp{0u};
     uint32_t iterations{1u};
     luisa::optional<uint32_t> max_spp_per_dispatch;
@@ -53,8 +61,27 @@ struct ExampleOptions {
     luisa::optional<luisa::filesystem::path> out_ref_path;
     bool out_ref_write{false};
     std::string error_message;
+    /// Set once `image_path()` handed out `--capture`; the remaining images of a
+    /// multi-image example keep using `output_dir`.
+    bool capture_consumed{false};
 
     [[nodiscard]] bool valid() const noexcept { return error_message.empty(); }
+
+    /// Destination of the rendered image whose default name would be
+    /// `default_name` (e.g. "test_path_tracing.png").
+    ///
+    /// `--capture <file>` claims the *first* image an example writes, which is
+    /// the picture the user asked for; the extra images of a multi-image example
+    /// (gui/image_process, ntc/luisa_ntc_viewer, ...) keep going to
+    /// `output_dir`. Without `--capture` this is exactly `output_dir /
+    /// default_name`, i.e. the historical behaviour.
+    [[nodiscard]] luisa::filesystem::path image_path(luisa::string_view default_name) {
+        if (capture_path && !capture_consumed) {
+            capture_consumed = true;
+            return *capture_path;
+        }
+        return output_dir / std::filesystem::path{std::string{default_name}};
+    }
 
     [[nodiscard]] static ExampleOptions parse(int argc, char *argv[]) {
         ExampleOptions opts;
@@ -80,6 +107,13 @@ struct ExampleOptions {
                     return fail("Missing value for --output-dir.");
                 }
                 opts.output_dir = luisa::filesystem::path{argv[++i]};
+            } else if (a == "--capture" || a == "--screenshot") {
+                if (missing_value(i, argc, argv) ||
+                    option_token(luisa::string_view{argv[i + 1]})) {
+                    return fail("Missing value for " + std::string{a} + ".");
+                }
+                opts.capture_path = luisa::filesystem::path{argv[++i]};
+                opts.offline = true;
             } else if (a == "--compare" || a == "-c") {
                 if (missing_value(i, argc, argv) ||
                     option_token(luisa::string_view{argv[i + 1]})) {

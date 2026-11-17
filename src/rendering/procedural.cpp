@@ -15,6 +15,7 @@
 #include <luisa/luisa-compute.h>
 #include <luisa/dsl/sugar.h>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 
 #ifndef ENABLE_DISPLAY
@@ -265,8 +266,8 @@ int main(int argc, char *argv[]) {
     LUISA_INFO("Rendered {} spp in {} ms ({:.2f} spp/s).",
                spp, elapsed_ms, static_cast<double>(spp) / elapsed_ms * 1000.0);
 
-    auto output_path = opts.output_dir / "test_procedural.png";
-    if (stbi_write_png(output_path.string().c_str(), width, height, 4, pixels.data(), 0) == 0) {
+    auto output_path = opts.image_path("test_procedural.png");
+    if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4, pixels.data(), 0) == 0) {
         LUISA_WARNING("Failed to write '{}'.", output_path.string());
         return 1;
     }

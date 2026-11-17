@@ -17,6 +17,7 @@
 #include <string_view>
 
 #include "../common/nbody_render_plan.h"
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 #include <luisa/core/clock.h>
 #include <luisa/core/logging.h>
@@ -406,8 +407,8 @@ int main(int argc, char *argv[]) {
                 active_pixel_count, bright_pixel_count, feature_tile_count);
             return 1;
         }
-        auto output_path = opts.output_dir / "test_nbody_simulation.png";
-        if (stbi_write_png(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_nbody_simulation.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
             LUISA_ERROR("Failed to write '{}'.", output_path.string());
             return 1;
         }

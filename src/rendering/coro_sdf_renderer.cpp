@@ -11,6 +11,7 @@
 
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 #include "common/coro_scheduler_options.h"
 
@@ -319,8 +320,8 @@ int main(int argc, char *argv[]) {
     stream << hdr2ldr_shader(accum_image, ldr_image, 2.0f).dispatch(width, height)
            << ldr_image.copy_to(luisa::span{host_image})
            << synchronize();
-    auto output_path = opts.output_dir / "coro_sdf.png";
-    if (stbi_write_png(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
+    auto output_path = opts.image_path("coro_sdf.png");
+    if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
         LUISA_ERROR("Failed to write '{}'.", output_path.string());
         return 1;
     }

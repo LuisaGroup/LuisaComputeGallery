@@ -12,6 +12,7 @@
 
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 
 #include <luisa/luisa-compute.h>
@@ -559,8 +560,8 @@ int main(int argc, char *argv[]) {
            << synchronize();
 
     LUISA_INFO("FPS: {}", frame_count / clock.toc() * 1000);
-    auto output_path = opts.output_dir / "test_path_tracing_camera.png";
-    if (stbi_write_png(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
+    auto output_path = opts.image_path("test_path_tracing_camera.png");
+    if (luisa::gallery::image_io::write_image(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
         LUISA_ERROR("Failed to write '{}'.", output_path.string());
         return 1;
     }

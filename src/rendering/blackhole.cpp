@@ -24,6 +24,7 @@
 #include <optional>
 #include <string_view>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 
 using namespace luisa;
@@ -392,8 +393,8 @@ int main(int argc, char *argv[]) {
         luisa::vector<std::array<uint8_t, 4u>> host_image(width * height);
         stream << display.copy_to(luisa::span{host_image})
                << synchronize();
-        auto output_path = opts.output_dir / "test_blackhole.png";
-        if (stbi_write_png(output_path.string().c_str(), width, height, 4,
+        auto output_path = opts.image_path("test_blackhole.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4,
                            host_image.data(), 0) == 0) {
             LUISA_ERROR("Failed to write '{}'.", output_path.string());
             return 1;

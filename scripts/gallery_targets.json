@@ -657,11 +657,11 @@
           ],
           "mirror_as_test": false,
           "gui_dep": true,
-          "headless_hint": "`--headless` (gui/image_process/headless_test.cpp) processes the bundled images and writes results; the window path is interactive",
+          "headless_hint": "`example_image_process <backend> --headless [--image <png|jpg>] [--capture <out.jpg>] [--frames N]`; without --image the full headless self test runs instead of one offscreen image",
           "notes": "comdlg32 is needed on windows only for the native open/save dialogs (xmake add_syslinks, cmake target_link_libraries); the generator should add the platform guard",
           "headless": [
-            "--frames",
-            "1"
+            "--image",
+            "$ROOT/asset/sdf_renderer.png"
           ]
         },
         {
@@ -775,8 +775,9 @@
           "mirror_as_test": false,
           "gui_dep": false,
           "headless_hint": "no GUI; `bindless_mip <backend>`",
-          "notes": "cmake only (examples/CMakeLists.txt line 150); no xmake target",
+          "notes": "xmake + cmake (examples/CMakeLists.txt line 150)",
           "build_systems": [
+            "xmake",
             "cmake"
           ],
           "headless": []
@@ -926,9 +927,6 @@
           "gui_dep": false,
           "headless_hint": "`--offline` or `--self-test` with a JSON dispatch document (e.g. native_shader_examples/simple_add.json); verifies results on the host. `mode.interactive` in the document needs the gui module",
           "notes": "xmake depends on lc-yyjson unless lc_yyjson_use_xrepo is on, in which case it add_packages('yyjson') instead (i.e. the dependency must be conditional on the yyjson_xrepo condition key); the cmake file adds no explicit link at all and gets yyjson through the luisa::compute umbrella. LUISA_ENABLE_GUI is added only when gui is on",
-          "headless_skip": {
-            "cuda": "NVRTC PTX rejected by the installed driver (CUDA 13.5 toolkit vs older driver)"
-          },
           "headless": []
         },
         {
@@ -943,9 +941,6 @@
           "gui_dep": false,
           "headless_hint": "no GUI; no arguments - compiles one native kernel, dispatches it, verifies, exits non-zero on failure",
           "notes": "minimal companion of example_native_shader (one TU, no dispatch document, no gui)",
-          "headless_skip": {
-            "cuda": "NVRTC PTX rejected by the installed driver (CUDA 13.5 toolkit vs older driver)"
-          },
           "headless": []
         },
         {
@@ -1282,6 +1277,7 @@
           "headless_hint": "no GUI; no arguments, creates a dx device through the CustomSDKConfig extension",
           "notes": "creates its own DX device with a private Agility SDK copy; argv[1] only tags the run",
           "build_systems": [
+            "xmake",
             "cmake"
           ],
           "headless": []
@@ -1437,9 +1433,15 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; interactive retrieval REPL that also speaks newline-delimited JSON-RPC on stdin/stdout (that is the scriptable path)",
+          "headless_hint": "REPL + JSON-RPC; with stdin at EOF it indexes and exits, so `echo \"\" | example_embed_retrieval --model ... --tokenizer ...` is a valid headless run",
           "notes": "ws2_32 on windows only (xmake add_syslinks('ws2_32'), cmake target_link_libraries(... ws2_32) under if(WIN32)) - the generator should add the platform guard",
-          "headless_skip": "interactive REPL"
+          "headless": [
+            "--model",
+            "$ROOT/data/bge-m3/model.bgm",
+            "--tokenizer",
+            "$ROOT/data/bge-m3/tokenizer.json"
+          ],
+          "backend_style": "flag"
         },
         {
           "name": "example_embed_dump_golden",
@@ -1457,8 +1459,14 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "host dev tool: dumps golden intermediates from a packed model.bgm",
-          "headless_skip": "needs model.bgm"
+          "headless_hint": "host-side golden dumper: `dump_golden <backend> <model.bgm> <tokenizer.json> <sentence_index|text>`",
+          "headless": [
+            "$ROOT/data/bge-m3/model.bgm",
+            "$ROOT/data/bge-m3/tokenizer.json",
+            "hello",
+            "--layers",
+            "0,1"
+          ]
         },
         {
           "name": "example_embed_text",
@@ -1476,8 +1484,12 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; CLI that encodes sentences from the command line with a packed model",
-          "headless_skip": "needs model.bgm"
+          "headless_hint": "$ROOT/data/bge-m3/model.bgm + tokenizer.json (scripts/unpack_data.py): `<name> <backend> <model.bgm> <tokenizer.json> [sentence...]`",
+          "headless": [
+            "$ROOT/data/bge-m3/model.bgm",
+            "$ROOT/data/bge-m3/tokenizer.json",
+            "A photograph of a red apple on a wooden table"
+          ]
         }
       ]
     },
@@ -1684,8 +1696,11 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; the CLI is fail-closed and prints structured output; runs fully headless (`example_ocr <args>`)",
-          "headless_skip": "needs an OCR model package"
+          "headless_hint": "`example_ocr --list-models` / `--help` need neither device nor package; real inference needs a validated .lcocr package and fails closed (see src/ocr/MODELS.md)",
+          "headless": [
+            "--list-models"
+          ],
+          "backend_style": "flag"
         },
         {
           "name": "lc-example-ocr-bench",
@@ -1735,8 +1750,10 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; benchmark driver CLI (prints a report)",
-          "headless_skip": "needs an OCR model package"
+          "headless_hint": "`example_ocr_bench <backend> <suite>` with suite = ops|decode|cnn|layout|gdn|moe|model|all; the synthetic suites need no weights",
+          "headless": [
+            "ops"
+          ]
         }
       ]
     },
@@ -1787,8 +1804,12 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; `luisa_ntc_cli --compress/--decompress/--describe ...`",
-          "headless_skip": "needs NTC textures"
+          "headless_hint": "`luisa_ntc_cli -c --loadManifest=<json> -o <file.ntc>`, `-D --loadCompressed=<file.ntc> -i <dir>`, `--describe <file.ntc>`",
+          "headless": [
+            "--describe",
+            "$ROOT/data/ntc/material.ntc"
+          ],
+          "backend_style": "flag-equals"
         },
         {
           "name": "luisa_ntc_bench",
@@ -1809,8 +1830,12 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; `luisa_ntc_bench <ntc file> [--backend cuda] [--iterations N]`",
-          "headless_skip": "needs NTC textures"
+          "headless_hint": "`luisa_ntc_bench --ntc=<file.ntc> [--backend=cuda] [--iters=N]`",
+          "headless": [
+            "--ntc=$ROOT/data/ntc/material.ntc",
+            "--iters=2"
+          ],
+          "backend_style": "flag-equals"
         },
         {
           "name": "luisa_ntc_test",
@@ -1831,8 +1856,10 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI; parity/compatibility test binary, prints a report and returns non-zero on failure",
-          "headless_skip": "needs NTC textures"
+          "headless_hint": "`luisa_ntc_test [backend] [--ntc=<file.ntc>] [--official-cli=<path>] [--ref-dir=<dir>]`; NTC_SAMPLE_NTC/NTC_REF_DIR override the sample",
+          "headless": [
+            "--ntc=$ROOT/data/ntc/material.ntc"
+          ]
         },
         {
           "name": "luisa_ntc_viewer",
@@ -1859,9 +1886,12 @@
           "requires": [],
           "mirror_as_test": false,
           "gui_dep": false,
-          "headless_hint": "no GUI-free mode: opens an ImGui window (`luisa_ntc_viewer <ntc file> [--backend cuda]`)",
+          "headless_hint": "`luisa_ntc_viewer --ntc=<file.ntc> [--channel=N] [--mip=N] --headless` renders one texture offscreen to viewer_output.png",
           "notes": "built unconditionally by both build systems; when the GUI module is on it additionally links lc-gui (xmake: is_gui && lc_enable_gui; cmake: if(LUISA_COMPUTE_ENABLE_GUI)) and defines LUISA_ENABLE_GUI. This is the only ntc target with a GUI, so gui_dep is false but the conditional dep/define still has to be emitted for 'when: gui'",
-          "headless_skip": "needs NTC textures + GUI"
+          "headless": [
+            "--ntc=$ROOT/data/ntc/material.ntc"
+          ],
+          "backend_style": "flag-equals"
         }
       ]
     },

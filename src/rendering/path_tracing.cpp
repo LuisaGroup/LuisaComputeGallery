@@ -16,6 +16,7 @@
 #include <luisa/backends/ext/dx_hdr_ext.hpp>
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 #include "common/path_tracing_sample_plan.h"
 #include "rendering/path_tracing_test.h"
@@ -536,8 +537,8 @@ int main(int argc, char *argv[]) {
         LUISA_WARNING("Path tracing failed: {}", result.error);
         return 1;
     }
-    auto output_path = opts.output_dir / "test_path_tracing.png";
-    if (stbi_write_png(
+    auto output_path = opts.image_path("test_path_tracing.png");
+    if (luisa::gallery::image_io::write_image(
             output_path.string().c_str(),
             static_cast<int>(result.resolution.x),
             static_cast<int>(result.resolution.y), 4,

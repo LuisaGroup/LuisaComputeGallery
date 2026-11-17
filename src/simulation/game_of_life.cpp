@@ -22,6 +22,7 @@
 #include <thread>
 #include <chrono>
 
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 #include <luisa/core/logging.h>
 #include <luisa/runtime/context.h>
@@ -176,8 +177,8 @@ int main(int argc, char *argv[]) {
         }
         luisa::vector<uint8_t> host_image(display_width * display_height * 4u);
         stream << display.copy_to(luisa::span{host_image}) << synchronize();
-        auto output_path = opts.output_dir / "test_game_of_life.png";
-        if (stbi_write_png(output_path.string().c_str(), display_width, display_height, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_game_of_life.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), display_width, display_height, 4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", output_path.string());
             return 1;
         }

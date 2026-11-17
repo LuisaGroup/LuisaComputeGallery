@@ -14,19 +14,22 @@ gallery_target(luisa_ntc_cli
     SOURCES "tools/luisa_ntc_cli.cpp"
     DEPS luisa-ntc
     INCLUDES "$GROUP/include" "$GROUP/include/libntc" "$SRC" "$LC/src/ext/yyjson/src" "$LC/src/ext/stb"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --describe $ROOT/data/ntc/material.ntc
 )
 gallery_target(luisa_ntc_bench
     SOURCES "tools/luisa_ntc_bench.cpp"
     DEPS luisa-ntc
     INCLUDES "$GROUP/include" "$GROUP/include/libntc" "$SRC" "$LC/src/ext/yyjson/src" "$LC/src/ext/stb"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --ntc=$ROOT/data/ntc/material.ntc --iters=2
 )
 gallery_target(luisa_ntc_test
     SOURCES "tools/luisa_ntc_test.cpp"
     DEPS luisa-ntc
     INCLUDES "$GROUP/include" "$GROUP/include/libntc" "$SRC" "$LC/src/ext/yyjson/src" "$LC/src/ext/stb"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --ntc=$ROOT/data/ntc/material.ntc
 )
 # built unconditionally by both build systems; when the GUI module is on it additionally links lc-gui (xmake: is_gui && lc_enable_gui; cmake: if(LUISA_COMPUTE_ENABLE_GUI)) and defines LUISA_ENABLE_GUI. This is the only ntc target with a GUI, so gui_dep is false but the conditional dep/define still has to be emitted for 'when: gui'
 gallery_target(luisa_ntc_viewer
@@ -34,5 +37,6 @@ gallery_target(luisa_ntc_viewer
     DEPS luisa-ntc
     INCLUDES "$GROUP/include" "$GROUP/include/libntc" "$SRC" "$LC/src/ext/yyjson/src" "$LC/src/ext/stb"
     COND_DEFINES "gui:LUISA_ENABLE_GUI"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --ntc=$ROOT/data/ntc/material.ntc
 )

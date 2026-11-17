@@ -4,6 +4,7 @@
 #include <random>
 #include <string_view>
 
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 
 #include "../../src/ext/stb/stb/stb_image.h"
@@ -64,6 +65,7 @@ int main(int argc, char *argv[]) {
         if (argument == "--compare" || argument == "-c" ||
             argument == "--iterations" || argument == "--frames" ||
             argument == "--spp" || argument == "--output-dir" ||
+            argument == "--capture" || argument == "--screenshot" ||
             argument == "--max-spp-per-dispatch") {
             i++;
         } else if (!argument.empty() && argument.front() != '-') {
@@ -82,8 +84,12 @@ int main(int argc, char *argv[]) {
     auto image = [&] {
         if (input_image != nullptr) {// load texture from file
             auto image_width = 0, image_height = 0, image_channels = 0;
-            auto image_pixels = stbi_load(input_image, &image_width, &image_height, &image_channels, 1);
-            LUISA_ASSERT(image_pixels != nullptr, "Failed to load image: {}.", input_image);
+              auto image_pixels = stbi_load(input_image, &image_width, &image_height, &image_channels, 1);
+              if (image_pixels == nullptr) {
+                  LUISA_ERROR("Failed to load image: {}.", input_image);
+                  std::exit(1);
+              }
+
             auto texture = device.create_image<float>(PixelStorage::BYTE1, image_width, image_height);
             stream << texture.copy_from(luisa::span{image_pixels, static_cast<size_t>(image_width * image_height)});
             stbi_image_free(image_pixels);
@@ -173,8 +179,8 @@ int main(int argc, char *argv[]) {
             elapsed_ms / static_cast<double>(offline_iterations));
         luisa::vector<uint8_t> host_image(resolution.x * resolution.y * 4u);
         stream << framebuffer.copy_to(luisa::span{host_image}) << synchronize();
-        auto output_path = opts.output_dir / "test_shader_toy_spacex.png";
-        if (stbi_write_png(output_path.string().c_str(), static_cast<int>(resolution.x), static_cast<int>(resolution.y), 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_shader_toy_spacex.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), static_cast<int>(resolution.x), static_cast<int>(resolution.y), 4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", output_path.string());
             return 1;
         }

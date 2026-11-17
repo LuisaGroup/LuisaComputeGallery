@@ -76,6 +76,21 @@ def skip_reason(target: dict, backend: str) -> str | None:
     return reason
 
 
+def backend_argv(backend: str, target: dict) -> list[str]:
+    """How a target wants its backend on the command line.
+
+    Most examples take it as argv[1] (`example_xxx cuda ...`), but a few CLI
+    tools follow their own convention, recorded as "backend_style" in the
+    manifest: "flag" is `--backend cuda`, "flag-equals" is `--backend=cuda`.
+    """
+    style = target.get("backend_style", "positional")
+    if style == "flag":
+        return ["--backend", backend]
+    if style == "flag-equals":
+        return [f"--backend={backend}"]
+    return [backend]
+
+
 def find_exe(exe_dir: Path, name: str) -> Path | None:
     for suffix in (".exe", ""):
         candidate = exe_dir / (name + suffix)
@@ -142,7 +157,11 @@ def main() -> int:
         if exe is None:
             result.update(status="missing", reason=f"binary not found in {exe_dir}")
             return result
-        argv = [str(exe), args.backend, "--headless", *example_args]
+        # "$ROOT" in a manifest argument expands to the repository root, so a
+        # target that needs weights can point at `$ROOT/data/...` regardless of
+        # the working directory the runner uses.
+        expanded = [a.replace("$ROOT", str(ROOT)) for a in example_args]
+        argv = [str(exe), *backend_argv(args.backend, target), "--headless", *expanded]
         result["command"] = " ".join(argv)
         log = out_root / f"{name}.log"
         timeout = target.get("headless_timeout", args.timeout)
@@ -150,7 +169,8 @@ def main() -> int:
         try:
             with log.open("wb") as handle:
                 completed = subprocess.run(argv, cwd=str(out_root), stdout=handle,
-                                           stderr=subprocess.STDOUT, timeout=timeout)
+                                           stderr=subprocess.STDOUT, timeout=timeout,
+                                           stdin=subprocess.DEVNULL)
             result["status"] = "ok" if completed.returncode == 0 else "fail"
             result["reason"] = "" if completed.returncode == 0 else f"exit code {completed.returncode}"
         except subprocess.TimeoutExpired:

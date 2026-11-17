@@ -21,6 +21,7 @@
 #include <luisa/gui/framerate.h>
 #include <luisa/runtime/swapchain.h>
 
+#include "common/image_io.h"
 #include "common/headless.h"
 
 using namespace luisa;
@@ -82,7 +83,7 @@ int main(int argc, char *argv[]) {
             stream << image.copy_to(luisa::span{host_image}) << synchronize();
         }
         auto file = headless.path("gui_swapchain_static.png");
-        if (stbi_write_png(file.c_str(), width, height, 4, host_image.data(), 0) == 0) {
+        if (luisa::gallery::image_io::write_image(file.c_str(), width, height, 4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", file);
             return 1;
         }

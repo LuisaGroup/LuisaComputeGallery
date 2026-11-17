@@ -32,17 +32,20 @@ gallery_target(example_embed_retrieval
     DEPS lc-example-embedding
     INCLUDES "$SRC" "$GROUP"
     LIBS ws2_32
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --model $ROOT/data/bge-m3/model.bgm --tokenizer $ROOT/data/bge-m3/tokenizer.json
 )
 gallery_target(example_embed_dump_golden
     SOURCES "tools/dump_golden.cpp"
     DEPS lc-example-embedding
     INCLUDES "$SRC" "$GROUP"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS $ROOT/data/bge-m3/model.bgm $ROOT/data/bge-m3/tokenizer.json hello --layers 0,1
 )
 gallery_target(example_embed_text
     SOURCES "example_embed_text.cpp"
     DEPS lc-example-embedding
     INCLUDES "$SRC" "$GROUP"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS $ROOT/data/bge-m3/model.bgm $ROOT/data/bge-m3/tokenizer.json A photograph of a red apple on a wooden table
 )

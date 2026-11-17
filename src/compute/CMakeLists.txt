@@ -7,7 +7,7 @@ gallery_target(example_helloworld
     MIRROR_AS_TEST
     HEADLESS
 )
-# cmake only (examples/CMakeLists.txt line 150); no xmake target
+# xmake + cmake (examples/CMakeLists.txt line 150)
 gallery_target(example_bindless_mip
     SOURCES "bindless_mip.cpp"
     HEADLESS
@@ -60,13 +60,11 @@ gallery_target(example_native_shader
     DEPS lc-yyjson
     COND_DEFINES "gui:LUISA_ENABLE_GUI"
     HEADLESS
-    SKIP_BACKENDS cuda
 )
 # minimal companion of example_native_shader (one TU, no dispatch document, no gui)
 gallery_target(example_native_shader_minimal
     SOURCES "native_shader_examples/minimal.cpp"
     HEADLESS
-    SKIP_BACKENDS cuda
 )
 # xmake add_files('*.cpp') in examples/compute/compact (no open(...) guard); cmake lists compute/compact/main.cpp + gdeflate.cpp explicitly. Only this one target comes from that directory (compute/compact has an xmake.lua but no CMakeLists.txt)
 gallery_target(example_gdeflate

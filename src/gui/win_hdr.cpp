@@ -14,6 +14,7 @@
 #include <stb/stb_image.h>
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/headless.h"
 
 using namespace luisa;
@@ -170,7 +171,7 @@ int main(int argc, char *argv[]) {
         luisa::vector<uint8_t> host_image(static_cast<size_t>(resolution.x) * resolution.y * 4u);
         stream << ldr_image.copy_to(luisa::span{host_image}) << synchronize();
         auto file = headless.path("gui_win_hdr.png");
-        if (stbi_write_png(file.c_str(), static_cast<int>(resolution.x), static_cast<int>(resolution.y),
+        if (luisa::gallery::image_io::write_image(file.c_str(), static_cast<int>(resolution.x), static_cast<int>(resolution.y),
                            4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", file);
             return 1;

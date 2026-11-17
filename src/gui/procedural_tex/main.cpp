@@ -46,6 +46,7 @@
 #endif
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/headless.h"
 
 using namespace luisa;
@@ -140,7 +141,7 @@ void write_png(const luisa::filesystem::path &path, const luisa::vector<float4> 
             bytes[i * 4u + c] = static_cast<std::uint8_t>(v * 255.0f + 0.5f);
         }
     }
-    stbi_write_png(path.string().c_str(),
+    luisa::gallery::image_io::write_image(path.string().c_str(),
                    static_cast<int>(resolution.x), static_cast<int>(resolution.y),
                    4, bytes.data(), static_cast<int>(resolution.x * 4u));
 }
@@ -148,8 +149,8 @@ void write_png(const luisa::filesystem::path &path, const luisa::vector<float4> 
 }// namespace
 
 int main(int argc, char *argv[]) {
-    // Consume --headless/--cli, --frames N and --output-dir DIR from argv; the
-    // example keeps parsing the rest and folds these three in below.
+    // Consume --headless/--cli, --frames N, --output-dir DIR and --capture FILE
+    // from argv; the example keeps parsing the rest and folds these in below.
     auto output_dir_given = false;
     for (auto i = 1; i < argc; ++i) {
         if (argv[i] != nullptr && luisa::string_view{argv[i]} == "--output-dir") {
@@ -162,6 +163,14 @@ int main(int argc, char *argv[]) {
     if (headless.enabled()) { opt.gui = false; }
     if (headless.frames != 0u) { opt.frames = headless.frames; }
     if (output_dir_given) { opt.output_dir = headless.output_dir; }
+    // --capture FILE: the first algorithm writes FILE (its extension picks the
+    // container), the remaining ones keep landing in --output-dir.
+    auto capture_path = headless.capture_path;
+    if (capture_path && !output_dir_given) {
+        auto parent = luisa::filesystem::path{*capture_path}.parent_path();
+        opt.output_dir = parent.empty() ? luisa::filesystem::path{"."} : parent;
+    }
+    auto capture_pending = capture_path.has_value();
     Context context{argv[0]};
     auto device = context.create_device(opt.backend.c_str());
     auto stream = device.create_stream(StreamTag::GRAPHICS);
@@ -186,13 +195,20 @@ int main(int argc, char *argv[]) {
         for (auto pass = 0u; pass < passes; ++pass) {
             for (auto i = 0u; i < textures.size(); ++i) {
                 all_ok &= headless_check(*textures[i], images[i], stream, resolution);
-                if (!opt.output_dir.empty() && pass + 1u == passes) {
-                    stream << images[i].copy_to(luisa::span{pixels}) << synchronize();
-                    luisa::filesystem::create_directories(opt.output_dir);
-                    auto file = opt.output_dir / luisa::format("{}.png", textures[i]->name());
-                    write_png(file, pixels, resolution);
-                    LUISA_INFO("[{}] wrote {}", textures[i]->name(), file.string());
-                }
+                  if ((!opt.output_dir.empty() || capture_pending) && pass + 1u == passes) {
+                      stream << images[i].copy_to(luisa::span{pixels}) << synchronize();
+                      luisa::filesystem::create_directories(opt.output_dir);
+                      auto file = luisa::filesystem::path{};
+                      if (capture_pending) {
+                          file = luisa::filesystem::path{*capture_path};
+                          capture_pending = false;
+                      } else {
+                          file = opt.output_dir / luisa::format("{}.png", textures[i]->name());
+                      }
+                      write_png(file, pixels, resolution);
+                      LUISA_INFO("[{}] wrote {}", textures[i]->name(), file.string());
+                  }
+
             }
         }
         if (!all_ok) {

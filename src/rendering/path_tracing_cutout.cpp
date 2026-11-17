@@ -10,6 +10,7 @@
 
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 #include "common/path_tracing_sample_plan.h"
 
@@ -566,7 +567,7 @@ int main(int argc, char *argv[]) {
             auto filename = luisa::filesystem::path{luisa::format(
                 "test_path_tracing_cutout_omm_{}.png", box.instance)};
             auto file_path = (opts.output_dir / filename).string();
-            stbi_write_png(file_path.c_str(),
+            luisa::gallery::image_io::write_image(file_path.c_str(),
                            static_cast<int>(size.x), static_cast<int>(size.y),
                            4, host_debug.data(), 0);
             LUISA_INFO("OMM debug view for the '{}': {} triangle(s) x {} micro "
@@ -1020,8 +1021,8 @@ int main(int argc, char *argv[]) {
         "Ray-query rendering median: {} ms for {} spp; throughput: {} spp/s.",
         median_rendering_time_ms, frame_count, sample_throughput);
     LUISA_INFO("FPS: {}", sample_throughput);
-    auto output_path = opts.output_dir / "test_path_tracing_cutout.png";
-    if (stbi_write_png(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
+    auto output_path = opts.image_path("test_path_tracing_cutout.png");
+    if (luisa::gallery::image_io::write_image(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
         LUISA_WARNING("Failed to write '{}'.", output_path.string());
         return 1;
     }

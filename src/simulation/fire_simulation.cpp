@@ -17,6 +17,7 @@
 #include <random>
 #include <string_view>
 
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 #include <luisa/core/clock.h>
 #include <luisa/core/logging.h>
@@ -427,8 +428,8 @@ int main(int argc, char *argv[]) {
             stream << particles.view(probe_indices[probe], 1u).copy_to(luisa::span{&final_particles[probe], 1u});
         }
         stream << synchronize();
-        auto output_path = opts.output_dir / "test_fire_simulation.png";
-        if (stbi_write_png(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_fire_simulation.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
             LUISA_ERROR("Failed to write '{}'.", output_path.string());
             return 1;
         }

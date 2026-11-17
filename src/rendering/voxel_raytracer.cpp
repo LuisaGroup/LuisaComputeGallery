@@ -27,6 +27,7 @@
 #include <optional>
 #include <string_view>
 
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 
 using namespace luisa;
@@ -386,8 +387,8 @@ int main(int argc, char *argv[]) {
             offline_iterations, elapsed_ms,
             elapsed_ms / static_cast<double>(offline_iterations));
         stream << display.copy_to(luisa::span{host_image}) << synchronize();
-        auto output_path = opts.output_dir / "test_voxel_raytracer.png";
-        if (stbi_write_png(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_voxel_raytracer.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), width, height, 4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", output_path.string());
             return 1;
         }

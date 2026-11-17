@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <string>
 
+#include "../../common/image_io.h"
 #include "../../common/headless.h"
 
 using namespace luisa;
@@ -251,7 +252,7 @@ int main(int argc, char *argv[]) {
                 for (const auto &tex : decomp_textures) {
                     std::string clean = get_clean_name(tex.name);
                     auto out_file = std::filesystem::path(save_images) / (clean + ".png");
-                    stbi_write_png(out_file.string().c_str(), mw, mh, tex.channels, tex.pixelBytes.data(), mw * tex.channels);
+                    luisa::gallery::image_io::write_image(out_file.string().c_str(), mw, mh, tex.channels, tex.pixelBytes.data(), mw * tex.channels);
                     LUISA_INFO("Saved image '{}': {}x{} pixels, {} channels, UNORM8.",
                                out_file.string(), mw, mh, tex.channels);
                 }

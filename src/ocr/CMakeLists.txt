@@ -14,7 +14,8 @@ gallery_target(example_ocr
     SOURCES "example_ocr.cpp"
     DEPS lc-example-ocr
     INCLUDES "$SRC" "$GROUP"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS --list-models
 )
 # xmake: add_files('bench/*.cpp'), includes src/tests + src/tests/integration/ocr privately, and defines LUISA_OCR_BENCHMARK_SOURCE_REVISION from $LUISA_OCR_SOURCE_REVISION (default 'unknown', whitespace stripped) plus absolute LUISA_OCR_TEST_DATA_DIR / LUISA_OCR_EXAMPLES_DIR paths. cmake takes the revision from `git rev-parse HEAD` and the same absolute paths. The three defines must be regenerated from the new root; the JSON shows the token form and a safe default
 gallery_target(lc-example-ocr-bench
@@ -29,5 +30,6 @@ gallery_target(example_ocr_bench
     SOURCES "example_ocr_bench.cpp"
     DEPS lc-example-ocr-bench
     INCLUDES "$GROUP"
-    NO_HEADLESS_TEST
+    HEADLESS
+    HEADLESS_ARGS ops
 )

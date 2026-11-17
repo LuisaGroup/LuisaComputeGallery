@@ -5,6 +5,9 @@ examples that used to live in `LuisaCompute/examples` are maintained here, with
 both xmake and CMake build configurations, headless (`--headless`) CLI support and
 their tests.
 
+Every example is documented in [docs/README.md](docs/README.md): purpose,
+architecture, command line, and the picture it produces.
+
 ## Layout
 
 ```
@@ -63,3 +66,28 @@ Add a target to `scripts/gallery_targets.json`, run
 `src/<group>/xmake.lua` / `CMakeLists.txt`. Both build systems are generated from
 the same manifest, so they cannot drift; `python scripts/gen_build.py --check`
 fails if they do.
+
+## Save the result picture
+
+Any example that draws something can write it to a file you name, without a
+window; the extension picks the container (png, jpg/jpeg, bmp, tga):
+
+```
+example_path_tracing dx --capture cornell.jpg --spp 64
+example_mpm88 cuda --capture mpm88.png --frames 8
+```
+
+See [docs/capture.md](docs/capture.md).
+
+## Example data
+
+The examples that need weights or textures read them from the git-ignored
+`data/` directory, which is published as a release archive:
+
+```
+python scripts/unpack_data.py    # download the newest package into data/
+python scripts/pack_data.py      # pack data/ and publish a new package
+```
+
+The archive is attached to the `Data` release of this repository; both scripts
+need `gh` and 7-Zip. See [AGENTS.md](AGENTS.md) for the options.

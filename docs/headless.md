@@ -15,8 +15,13 @@ an agent can execute it and check the result without touching a desktop.
 * `--frames N` — how many frames/iterations to run (`--iterations N` for the
   examples that predate this switch). `0` (or omitted) means "one frame, the
   smallest work the example can do meaningfully".
-* `--output-dir DIR` — where images/reports are written; defaults to the current
-  directory. Examples that produce an image write `<name>.png` there.
+  * `--output-dir DIR` — where images/reports are written; defaults to the current
+    directory. Examples that produce an image write `<name>.png` there.
+  * `--capture FILE` (alias `--screenshot FILE`) — write the result picture to
+    exactly `FILE`; the extension chooses the container (`.png`, `.jpg`/`.jpeg`,
+    `.bmp`, `.tga`) and asking for a capture implies `--headless`. See
+    [capture.md](capture.md).
+
 * The examples also take their own options after these (`--spp 1`,
   `--max-spp-per-dispatch N`, `--compare <reference.png>`, ...); run
   `<example> <backend> --help`-style usage is printed when the arguments are

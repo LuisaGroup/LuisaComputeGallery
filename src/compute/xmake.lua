@@ -3,7 +3,8 @@
 -- Regenerate with: python scripts/gen_build.py
 
 gallery_example("example_helloworld", {sources = {"helloworld.cpp"}})
--- example_bindless_mip: no xmake target (cmake only; see scripts/gallery_targets.json)
+-- xmake + cmake (examples/CMakeLists.txt line 150)
+gallery_example("example_bindless_mip", {sources = {"bindless_mip.cpp"}})
 gallery_example("example_cluster_launch_control", {sources = {"cluster_launch_control.cpp"}})
 gallery_example("example_async_copy_prefetch", {sources = {"async_copy_prefetch.cpp"}})
 -- the 'lbvh/*.cpp' wildcard comes from xmake; cmake lists lbvh_storage.cpp, lbvh_sort.cpp, blas.cpp, tlas.cpp, software_lbvh.cpp explicitly. The LBVH sources are shared by the bench/test targets

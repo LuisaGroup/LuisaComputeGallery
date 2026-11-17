@@ -1,6 +1,7 @@
 #include <fstream>
 #include <iostream>
 
+#include "../common/image_io.h"
 #include "../common/headless.h"
 
 #include <luisa/core/clock.h>
@@ -240,7 +241,7 @@ int main(int argc, char *argv[]) {
 
     LUISA_INFO("FPS: {}", frame_count / clock.toc() * 1000);
     auto output_file = headless.path("test_path_tracing.png");
-    if (stbi_write_png(output_file.c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
+    if (luisa::gallery::image_io::write_image(output_file.c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
         LUISA_WARNING("Failed to write '{}'.", output_file);
         return 1;
     }

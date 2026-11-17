@@ -38,6 +38,7 @@
 #include <luisa/runtime/rtx/aabb.h>
 #include <luisa/runtime/rtx/triangle.h>
 
+#include "common/image_io.h"
 #include <stb/stb_image_write.h>
 
 namespace luisa::native_shader {
@@ -962,7 +963,7 @@ bool write_output(const luisa::filesystem::path &path,
             payload = converted.data();
         }
         auto name = luisa::to_string(path);
-        if (stbi_write_png(name.c_str(), static_cast<int>(extent.x),
+        if (luisa::gallery::image_io::write_image(name.c_str(), static_cast<int>(extent.x),
                            static_cast<int>(extent.y), 4, payload, 0) == 0) {
             error = luisa::format("cannot write the PNG file '{}'",
                                   luisa::to_string(path));

@@ -15,6 +15,7 @@
 #include <random>
 #include <string_view>
 
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 #include <luisa/core/clock.h>
 #include <luisa/core/logging.h>
@@ -347,8 +348,8 @@ int main(int argc, char *argv[]) {
                 bright_pixel_count, wave_pixel_count, strong_wave_pixel_count, feature_tile_count);
             return 1;
         }
-        auto output_path = opts.output_dir / "test_wave_equation.png";
-        if (stbi_write_png(output_path.string().c_str(), display_width, display_height, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_wave_equation.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), display_width, display_height, 4, host_image.data(), 0) == 0) {
             LUISA_ERROR("Failed to write '{}'.", output_path.string());
             return 1;
         }

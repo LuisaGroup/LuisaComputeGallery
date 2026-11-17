@@ -11,6 +11,7 @@
 #include <luisa/dsl/coro_func.h>
 #include <luisa/dsl/sugar.h>
 
+#include "common/image_io.h"
 #include "common/headless.h"
 
 using namespace luisa;
@@ -416,7 +417,7 @@ int main(int argc, char *argv[]) {
                << ldr.copy_to(luisa::span{host_ldr}) << synchronize();
         auto file = headless.path("coro_on_demand_texture.png");
         LUISA_ASSERT(
-            stbi_write_png(file.c_str(), options.dimension,
+            luisa::gallery::image_io::write_image(file.c_str(), options.dimension,
                            options.dimension, 4, host_ldr.data(), 0) != 0,
             "Failed to write '{}'.", file);
     }

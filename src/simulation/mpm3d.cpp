@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <string_view>
 
+#include "../common/image_io.h"
 #include "../common/reference_compare.h"
 #include <luisa/dsl/syntax.h>
 #include <luisa/dsl/sugar.h>
@@ -404,8 +405,8 @@ int main(int argc, char *argv[]) {
                 static_cast<uint8_t>(std::clamp(pixel.w, 0.f, 1.f) * 255.f + 0.5f),
             };
         }
-        auto output_path = opts.output_dir / "test_mpm3d.png";
-        if (stbi_write_png(output_path.string().c_str(), resolution, resolution, 4, host_image.data(), 0) == 0) {
+        auto output_path = opts.image_path("test_mpm3d.png");
+        if (luisa::gallery::image_io::write_image(output_path.string().c_str(), resolution, resolution, 4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", output_path.string());
             return 1;
         }

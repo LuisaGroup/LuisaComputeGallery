@@ -16,6 +16,7 @@
 #include <luisa/core/stl/vector.h>
 #include <stb/stb_image_write.h>
 
+#include "common/image_io.h"
 #include "common/headless.h"
 
 using namespace luisa;
@@ -74,7 +75,7 @@ int main(int argc, char *argv[]) {
         luisa::vector<uint8_t> host_image(static_cast<size_t>(width) * height * 4u);
         stream << output_image.copy_to(luisa::span{host_image}) << synchronize();
         auto file = headless.path("gui_imgui.png");
-        if (stbi_write_png(file.c_str(), static_cast<int>(width), static_cast<int>(height),
+        if (luisa::gallery::image_io::write_image(file.c_str(), static_cast<int>(width), static_cast<int>(height),
                            4, host_image.data(), 0) == 0) {
             LUISA_WARNING("Failed to write '{}'.", file);
             return 1;

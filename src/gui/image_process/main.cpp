@@ -722,6 +722,12 @@ int main(int argc, char *argv[]) {
     if (output_dir_given) {
         options.output_dir = luisa::string{headless.output_dir.c_str()};
     }
+    // --capture FILE: the offscreen result goes to exactly that file; the
+    // extension picks the container (see common/image_io.h). Without an explicit
+    // --image the full self test still runs and writes its own files.
+    if (headless.capture_path && options.save_path.empty()) {
+        options.save_path = *headless.capture_path;
+    }
     auto device = context.create_device(options.backend);
     if (options.headless) {
         // With --image the self test is replaced by an offscreen run of that

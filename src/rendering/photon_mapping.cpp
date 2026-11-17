@@ -10,6 +10,7 @@
 #include <stb/stb_image_write.h>
 
 #include "common/photon_mapping_plan.h"
+#include "common/image_io.h"
 #include "common/reference_compare.h"
 
 #include <luisa/luisa-compute.h>
@@ -674,8 +675,8 @@ int main(int argc, char *argv[]) {
     }
     stream << ldr_image.copy_to(luisa::span{host_image}) << synchronize();
 
-    auto output_path = opts.output_dir / "test_photon_mapping.png";
-    if (stbi_write_png(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
+    auto output_path = opts.image_path("test_photon_mapping.png");
+    if (luisa::gallery::image_io::write_image(output_path.string().c_str(), resolution.x, resolution.y, 4, host_image.data(), 0) == 0) {
         LUISA_WARNING("Failed to write '{}'.", output_path.string());
         return 1;
     }

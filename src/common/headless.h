@@ -29,6 +29,7 @@
  * get the same behaviour from that parser and do not need this header.
  */
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,10 +43,26 @@ struct Options {
     uint32_t frames{0u};
     /// `--output-dir DIR`: where images/reports go. Defaults to the working dir.
     std::string output_dir{"."};
+    /// `--capture <path>` (alias `--screenshot <path>`): write the main result
+    /// image to exactly this file. The container follows the extension
+    /// (.png/.jpg/.jpeg/.bmp/.tga, see common/image_io.h), and asking for a
+    /// capture implies the headless path.
+    std::optional<std::string> capture_path;
+    /// Set once path() handed out the capture target.
+    bool capture_consumed{false};
 
     [[nodiscard]] bool enabled() const noexcept { return headless; }
+
     /// Path of an output file inside `output_dir`.
-    [[nodiscard]] std::string path(std::string_view file_name) const {
+    ///
+    /// With `--capture <file>` the *first* call returns that file verbatim (the
+    /// picture the user asked for); any further call - a multi-image example
+    /// writing its intermediates - keeps using `output_dir`.
+    [[nodiscard]] std::string path(std::string_view file_name) {
+        if (capture_path && !capture_consumed) {
+            capture_consumed = true;
+            return *capture_path;
+        }
         if (output_dir.empty() || output_dir == ".") { return std::string{file_name}; }
         auto dir = output_dir;
         while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) { dir.pop_back(); }
@@ -61,10 +78,10 @@ namespace detail {
 
 }// namespace detail
 
-/// Consume `--headless`, `--frames N` and `--output-dir DIR` from argv. Every
-/// other argument is kept, in order, so the caller can continue parsing.
-/// `--offline` is *not* consumed: examples that understand it (ExampleOptions)
-/// must still see it.
+/// Consume `--headless`, `--frames N`, `--output-dir DIR` and
+/// `--capture|--screenshot PATH` from argv. Every other argument is kept, in
+/// order, so the caller can continue parsing. `--offline` is *not* consumed:
+/// examples that understand it (ExampleOptions) must still see it.
 [[nodiscard]] inline Options parse(int &argc, char *argv[]) noexcept {
     Options options;
     std::vector<char *> kept;
@@ -82,6 +99,12 @@ namespace detail {
         }
         if (arg == "--output-dir" && i + 1 < argc && argv[i + 1] != nullptr) {
             options.output_dir = argv[++i];
+            continue;
+        }
+        if ((arg == "--capture" || arg == "--screenshot") &&
+            i + 1 < argc && argv[i + 1] != nullptr) {
+            options.capture_path = std::string{argv[++i]};
+            options.headless = true;
             continue;
         }
         kept.push_back(argv[i]);

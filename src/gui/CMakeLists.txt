@@ -45,7 +45,7 @@ gallery_target(example_image_process
     REQUIRES gui
     GUI_DEP
     HEADLESS
-    HEADLESS_ARGS --frames 1
+    HEADLESS_ARGS --image $ROOT/asset/sdf_renderer.png
 )
 # the 'noise_*.cpp' wildcard comes from xmake add_files; the cmake file lists the same 17 files explicitly (noise_all.cpp + noise_*.cpp). LUISA_ENABLE_GUI is added only when the GUI module is enabled (both build systems); the target itself is built unconditionally
 gallery_target(example_procedural_tex
