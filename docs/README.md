@@ -178,6 +178,12 @@ or one whose feature only exists on some backends, says so in the same cell.
 | [example_ocr](examples/example_ocr.md) | Command-line front end of the LuisaCompute OCR engine: validates a complete recognition request, prints the model support report offline, and refuses unvalidated models instead of inventing text. | none (offline tool, no device) |
 | [example_ocr_bench](examples/example_ocr_bench.md) | Correctness-gated benchmark harness for the OCR engine: runs a suite of synthetic workloads on the device and reports latency statistics, counters and correctness flags as JSON. | dx, vk, cuda |
 
+## qwen
+
+| Example | What it shows | Backends |
+|---|---|---|
+| [example_qwen](examples/example_qwen.md) | Text-only, single-sequence Qwen3.5-4B inference on LuisaCompute: four explicitly selectable engine variants (ordinary DSL or Tile kernels × BF16 or true FP8 E4M3 weights), an exact GGUF-loaded tokenizer, greedy or... | dsl: cuda, dx, vk; tile: dx, vk (real-model inference and device suite); Tile CUDA is unavailable in this build |
+
 ## ntc
 
 | Example | What it shows | Backends |
@@ -204,5 +210,6 @@ or one whose feature only exists on some backends, says so in the same cell.
 | embedding | 3 |
 | embedding_mm | 1 |
 | ocr | 2 |
+| qwen | 1 |
 | ntc | 4 |
-| **total** | **65** |
+| **total** | **66** |

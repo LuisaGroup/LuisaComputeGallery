@@ -229,6 +229,46 @@ for _, name in ipairs(ocr_device_tests) do
 end
 
 -- ---------------------------------------------------------------------------
+-- Qwen3.5-4B engine: the examples live in src/qwen. Host-only / device-light
+-- tests (no device, no backend, no weights required); the real-GGUF tokenizer
+-- test reads data/Qwen3.5-4B-BF16.gguf from the working directory when present
+-- and skips otherwise. The shared-layer tests (gguf/weights) are registered
+-- the same way.
+-- ---------------------------------------------------------------------------
+local qwen_host_tests = {
+    "test_qwen_gguf",
+    "test_qwen_weights",
+    "test_qwen_engine",
+    "test_qwen_speculative",
+}
+for _, name in ipairs(qwen_host_tests) do
+    gallery_test(name, {
+        sources = {"unit/qwen/" .. name .. ".cpp"},
+        deps = {"lc-example-qwen"},
+        -- "qwen/xxx.h" resolves through src/qwen; "ocr/xxx.h" through src/ocr
+        -- (the qwen layer reuses the OCR status/tokenizer headers).
+        includes = {"$SRC/qwen", "$SRC/ocr"},
+    })
+end
+
+-- Qwen device operator regression tests: synthetic data only (no weights),
+-- explicit backend argv[1] (dsl verified on cuda, tile on dx; vk optional).
+--   xmake run test_qwen_ops_dsl cuda
+--   xmake run test_qwen_ops_tile dx
+local qwen_device_tests = {
+    "test_qwen_ops_dsl",
+    "test_qwen_ops_tile",
+    "test_qwen_mtp",
+}
+for _, name in ipairs(qwen_device_tests) do
+    gallery_test(name, {
+        sources = {"integration/qwen/" .. name .. ".cpp"},
+        deps = {"lc-example-qwen"},
+          includes = {"$SRC/qwen", "$SRC/ocr", "integration/qwen"},
+      })
+end
+
+-- ---------------------------------------------------------------------------
 -- Benchmarks (built, not part of the test suite).
 -- ---------------------------------------------------------------------------
 -- Optimization-phase benchmark for the bge-m3 embedding engine
