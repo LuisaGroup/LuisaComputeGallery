@@ -18,6 +18,7 @@ includes("embedding")
 includes("embedding_mm")
 includes("ocr")
 includes("ntc")
+includes("benchmark")
 
 -- Moved verbatim, not wired into the gallery build (needs an Apple toolchain):
 --   ios/

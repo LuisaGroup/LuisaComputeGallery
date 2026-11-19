@@ -2119,6 +2119,50 @@
           "ios_only": true
         }
       ]
+    },
+    {
+      "dir": "benchmark",
+      "targets": [
+        {
+          "name": "benchmark_vk_hlsl",
+          "kind": "binary",
+          "sources": [
+            "vk_hlsl_benchmark.cpp",
+            "bench_compute.cpp",
+            "bench_raytracing.cpp",
+            "bench_physics.cpp",
+            "bench_inference.cpp",
+            "bench_common.h"
+          ],
+          "deps": [],
+          "requires": [
+            "vk"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "benchmark_vk_hlsl [vk] [--suite all|compute|raytracing|physics|inference] [--iters N] [--json out.json]",
+          "headless": [
+            "--iters",
+            "3"
+          ]
+        },
+        {
+          "name": "spirv_inspect",
+          "kind": "binary",
+          "sources": [
+            "spirv_inspect.cpp"
+          ],
+          "deps": [
+            "spirv-tools"
+          ],
+          "requires": [
+            "vk"
+          ],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_skip": "utility tool; requires input .spv files"
+        }
+      ]
     }
   ]
 }
