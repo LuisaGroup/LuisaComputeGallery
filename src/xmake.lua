@@ -17,6 +17,7 @@ includes("interop")
 includes("embedding")
 includes("embedding_mm")
 includes("ocr")
+includes("qwen")
 includes("ntc")
 includes("benchmark")
 

@@ -240,6 +240,47 @@ foreach (_gallery_ocr_test IN LISTS _gallery_ocr_device_tests)
 endforeach ()
 
 # ---------------------------------------------------------------------------
+# Qwen3.5-4B engine (src/qwen): host-only / device-light unit tests. No device,
+# backend or weights are required; the real-GGUF tokenizer test reads
+# data/Qwen3.5-4B-BF16.gguf relative to the working directory when present.
+foreach (_gallery_qwen_test IN ITEMS
+        test_qwen_gguf
+        test_qwen_weights
+        test_qwen_engine
+        test_qwen_speculative)
+    gallery_test(${_gallery_qwen_test}
+            SOURCES "unit/qwen/${_gallery_qwen_test}.cpp"
+            DEPS lc-example-qwen
+            INCLUDES "$SRC/qwen" "$SRC/ocr"
+            LABELS "unit;unit_qwen")
+endforeach ()
+
+# Qwen device operator regression tests (tests/integration/qwen): synthetic
+# data only (no checkpoint), explicit backend argument. Built always; CTest
+# entries are added only when a backend is selected via LUISA_QWEN_DEVICE_BACKEND
+# (the tests fail without an explicit backend, so no default is registered).
+# cmake -DLUISA_QWEN_DEVICE_BACKEND=cuda ...   # dsl + tile
+set(LUISA_QWEN_DEVICE_BACKEND "" CACHE STRING
+        "Backend argument for the Qwen device tests' CTest entries (empty = build only, no CTest entry)")
+foreach (_gallery_qwen_device_test IN ITEMS
+        test_qwen_ops_dsl
+        test_qwen_ops_tile
+        test_qwen_mtp)
+    gallery_test(${_gallery_qwen_device_test} NO_CTEST
+            SOURCES "integration/qwen/${_gallery_qwen_device_test}.cpp"
+            DEPS lc-example-qwen
+            INCLUDES "$SRC/qwen" "$SRC/ocr" "integration/qwen")
+    if (LUISA_QWEN_DEVICE_BACKEND)
+        add_test(NAME ${_gallery_qwen_device_test}
+                COMMAND $<TARGET_FILE:${_gallery_qwen_device_test}> ${LUISA_QWEN_DEVICE_BACKEND})
+        set_tests_properties(${_gallery_qwen_device_test} PROPERTIES
+                LABELS "integration;integration_qwen"
+                TIMEOUT 900
+                WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/test-output")
+    endif ()
+endforeach ()
+
+# ---------------------------------------------------------------------------
 # Benchmarks (built, not part of the test suite -- as in LuisaCompute, where they
 # were registered without LABELS and therefore never ran under CTest).
 # ---------------------------------------------------------------------------

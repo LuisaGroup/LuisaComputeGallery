@@ -1758,6 +1758,60 @@
       ]
     },
     {
+      "dir": "qwen",
+      "targets": [
+        {
+          "name": "lc-example-qwen",
+          "kind": "static",
+          "sources": [
+            "qwen/*.cpp",
+          "../ocr/ocr/tokenizer.cpp",
+          "../ocr/ocr/detokenizer.cpp",
+          "../ocr/ocr/status.cpp"
+
+          ],
+          "deps": [
+            "lc-tile",
+            "lc-yyjson"
+          ],
+          "includes": [
+            "$GROUP",
+            "$SRC",
+            "$SRC/ocr",
+            "$LC/src/ext/yyjson/src"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "static library, no entry point (host tests live in tests/unit/qwen)",
+          "notes": "Qwen3.5-4B text-only engine. Reuses the OCR tokenizer/detokenizer/status sources (compiled here, not linked from lc-example-ocr, to keep the dependency surface small); needs lc-tile for the Tile executor and lc-yyjson for the GGUF->tokenizer.json construction. QwenTokenizer is allocated/freed through Luisa's allocator with a custom deleter (luisa::delete_with_allocator), so it does not depend on EASTL's default_delete allocator configuration propagating through the static-lib dep chain. Includes: $GROUP for qwen/*.h, $SRC/ocr for ocr/*.h, yyjson headers."
+        },
+        {
+          "name": "example_qwen",
+          "kind": "binary",
+          "sources": [
+            "example_qwen.cpp"
+          ],
+          "deps": [
+            "lc-example-qwen"
+          ],
+          "includes": [
+            "$GROUP",
+            "$SRC",
+            "$SRC/ocr"
+          ],
+          "requires": [],
+          "mirror_as_test": false,
+          "gui_dep": false,
+          "headless_hint": "`example_qwen --list-versions` / `--self-test` / `--help` need neither device nor model; real greedy inference needs data/Qwen3.5-4B-BF16.gguf and a backend (dsl verified cuda/dx/vk; tile verified dx, vk full inference currently device-lost)",
+          "headless": [
+            "--list-versions"
+          ],
+          "backend_style": "flag"
+        }
+      ]
+    },
+    {
       "dir": "ntc",
       "targets": [
         {

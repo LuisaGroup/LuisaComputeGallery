@@ -17,6 +17,7 @@ add_subdirectory(interop)
 add_subdirectory(embedding)
 add_subdirectory(embedding_mm)
 add_subdirectory(ocr)
+add_subdirectory(qwen)
 add_subdirectory(ntc)
 add_subdirectory(benchmark)
 
