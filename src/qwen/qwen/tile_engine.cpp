@@ -114,6 +114,10 @@ struct Key {
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
+QwenTileEngine::~QwenTileEngine() noexcept {
+    if (_stream) { _stream.synchronize(); }
+}
+
 [[nodiscard]] Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>> QwenTileEngine::create(
     Device &device, Stream &stream, const Qwen35Model &model,
     const QwenDeviceWeights &weights, const QwenEngineOptions &options) {
@@ -178,6 +182,7 @@ struct Key {
     e._prefill_chunk = options.base.prefill_chunk;
     e._weights = &weights;
     e._device = device;
+    e._stream = stream;
     const luisa::string_view backend{device.backend_name()};
     // Vulkan's legacy HLSL ABI requires storage-buffer view offsets aligned
     // to minStorageBufferOffsetAlignment (256 on NVIDIA). The one-token conv
@@ -322,19 +327,14 @@ struct Key {
     for (uint32_t l = 0; l < _layers; l++) {
         if (_layer_weights[l].full_attention) { full_count++; } else { gdn_count++; }
     }
-    _k_caches.reserve(full_count);
-    _v_caches.reserve(full_count);
     _gdn_states.reserve(gdn_count);
     _gdn_rings.reserve(2u * gdn_count);
-    _cache_bytes = 0;
-    for (uint32_t i = 0; i < full_count; i++) {
-        auto k = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-        auto v = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-        if (!k || !v) { return err(StatusCode::out_of_memory, "KV cache allocation failed"); }
-        _k_caches.push_back(std::move(k));
-        _v_caches.push_back(std::move(v));
-        _cache_bytes += 2u * kv_elems * 4u;
+    if (auto s = _kv_cache.create(device, _stream, _max_context,
+                                  static_cast<uint32_t>(kv_n), full_count);
+        !s.ok()) {
+        return s;
     }
+    _cache_bytes = _kv_cache.logical_bytes();
     for (uint32_t i = 0; i < gdn_count; i++) {
         auto st = device.create_buffer<float>(static_cast<size_t>(state_elems));
         // Ping-pong pair: token at pos reads ring[2*i + pos%2] and writes
@@ -647,10 +647,9 @@ template<typename F>
     }
     // Zero-fill shaders for state reset (sizes are static).
     {
-        const uint64_t kv_elems = static_cast<uint64_t>(_max_context) * _cfg.attn_kv_n();
         const uint64_t state_elems = static_cast<uint64_t>(_cfg.gdn_v_heads) * _cfg.gdn_head_dim * _cfg.gdn_head_dim;
         const uint64_t ring_elems = static_cast<uint64_t>(_cfg.gdn_qkv_n()) * (_cfg.conv_kernel - 1u);
-        for (auto n : {kv_elems, state_elems, ring_elems}) {
+        for (auto n : {state_elems, ring_elems}) {
             Key kz; kz.add("zero", n);
             if (auto s = shader_lazy(device, kz.s, [&] { return to::capture_tile_zero_fill(static_cast<uint32_t>(n)); }, &sh); !s.ok()) { return s; }
         }
@@ -676,20 +675,12 @@ template<typename F>
 [[nodiscard]] Status QwenTileEngine::reset(Stream &stream) {
     // Fresh report for a standalone reset; prefill appends after this reset.
     if (_benchmark) { _report.clear(); }
-    // The stream must be idle before we reuse staging / clear state.
-    stream << compute::synchronize();
+    // The allocator drains the stream before staging/state reuse and before
+    // its host-immediate CUDA unmap path; avoid a duplicate engine-level sync.
+    if (auto s = _kv_cache.reset(stream); !s.ok()) { return s; }
     QwenCommandBatch cl{stream, _benchmark ? &_report : nullptr, QwenBenchmarkPhase::reset, 0u, 0u};
     cl.layer(UINT32_MAX);
     Device device = _device;
-    // Full-attention KV caches, in transformer-layer order (_full_slot).
-    for (uint32_t l = 0; l < _layers; l++) {
-        const uint32_t slot = _full_slot[l];
-        if (slot == UINT32_MAX) { continue; }
-        const auto ls = luisa::string{std::to_string(l)};
-        cl.layer(l);
-        if (auto s = zero_buffer(cl, device, _k_caches[slot], luisa::string{"reset.k_cache.l"} + ls); !s.ok()) { return s; }
-        if (auto s = zero_buffer(cl, device, _v_caches[slot], luisa::string{"reset.v_cache.l"} + ls); !s.ok()) { return s; }
-    }
     // GDN recurrent states and ping-pong conv rings, in layer order.
     for (uint32_t l = 0; l < _layers; l++) {
         const uint32_t slot = _gdn_slot[l];
@@ -893,8 +884,8 @@ template<typename F>
     cl.layer(layer);
     const auto &lw = _layer_weights[layer];
     const uint32_t slot = _full_slot[layer];
-    const auto &kc = _k_caches[slot];
-    const auto &vc = _v_caches[slot];
+    const auto kc = _kv_cache.k_view(slot);
+    const auto vc = _kv_cache.v_view(slot);
     const uint32_t hd = _cfg.attn_head_dim;
     const uint32_t qh = _cfg.q_heads, kvh = _cfg.kv_heads;
     const uint32_t kv_n = _cfg.attn_kv_n();
@@ -945,7 +936,7 @@ template<typename F>
         Key key; key.add("kvapp", rows).add("c", kv_n).add("p0", pos0).add("cap", _max_context);
         if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_kv_append(rows, kv_n, pos0, _max_context); }, &sh); !s.ok()) { return s; }
         cl.annotate("attn.kv_append")
-          << (*sh)(_attn_kr.view(), _attn_v.view(), kc.view(), vc.view()).dispatch();
+          << (*sh)(_attn_kr.view(), _attn_v.view(), kc, vc).dispatch();
     }
     const uint32_t kv_len = pos0 + rows;
     // _attn_len/_kv_len were uploaded ONCE by forward_chunk for this chunk;
@@ -956,7 +947,7 @@ template<typename F>
             Key key; key.add("attndec_dyn", 0).add("cap", _max_context).add("qh", qh).add("kvh", kvh).add("hd", hd);
             if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_decode_dynamic(_cfg, _max_context); }, &sh); !s.ok()) { return s; }
             cl.annotate("attn.decode_dyn")
-              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc.view(), vc.view(),
+              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc,
                        _kv_len.view(0, _kv_len_stride), _attn_out.view()).dispatch();
         } else {
             Key key; key.add("attndec", kv_len).add("cap", _max_context).add("qh", qh).add("kvh", kvh).add("hd", hd);
@@ -967,14 +958,14 @@ template<typename F>
             if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_decode(_cfg, kv_len, _max_context); }, &sh); !s.ok()) { return s; }
             if (is_new) { _static_attention_count++; }
             cl.annotate("attn.decode_static")
-              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc.view(), vc.view(), _attn_out.view()).dispatch();
+              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc, _attn_out.view()).dispatch();
         }
     } else {
         if (_opt.dynamic_attention) {
             Key key; key.add("attnpf_dyn", rows).add("cap", _max_context).add("qh", qh).add("kvh", kvh).add("hd", hd);
             if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, rows, _max_context); }, &sh); !s.ok()) { return s; }
             cl.annotate("attn.prefill_dyn")
-              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc.view(), vc.view(),
+              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc,
                        _attn_len.view(), _attn_out.view()).dispatch();
         } else {
             Key key; key.add("attnpf", rows).add("p0", pos0).add("kv", kv_len).add("cap", _max_context)
@@ -986,7 +977,7 @@ template<typename F>
             if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_prefill(_cfg, rows, pos0, kv_len, _max_context); }, &sh); !s.ok()) { return s; }
             if (is_new) { _static_attention_count++; }
             cl.annotate("attn.prefill_static")
-              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc.view(), vc.view(), _attn_out.view()).dispatch();
+              << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc, _attn_out.view()).dispatch();
         }
     }
     // Output projection with fused residual epilogue:
@@ -1187,6 +1178,10 @@ template<typename F>
 // ---------------------------------------------------------------------------
 [[nodiscard]] Status QwenTileEngine::forward_chunk(Device &device, Stream &stream, QwenCommandBatch &cl,
                                                    uint32_t rows, uint32_t pos0) {
+    if (rows == 0u || pos0 > _max_context || rows > _max_context - pos0) {
+        return invalid("forward chunk exceeds sparse KV capacity");
+    }
+    if (auto s = _kv_cache.ensure_capacity(stream, pos0 + rows); !s.ok()) { return s; }
     const uint32_t hidden = _cfg.hidden;
     const t::Shader *sh = nullptr;
     // Upload the chunk-shared dynamic state ONCE: absolute RoPE positions

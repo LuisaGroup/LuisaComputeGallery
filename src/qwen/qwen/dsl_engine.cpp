@@ -81,6 +81,10 @@ namespace {
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
+QwenDslEngine::~QwenDslEngine() noexcept {
+    if (_stream) { _stream.synchronize(); }
+}
+
 [[nodiscard]] Result<luisa::unique_ptr<QwenEngine, QwenDslEngine::Deleter>> QwenDslEngine::create(
     Device &device, Stream &stream, const Qwen35Model &model,
     const QwenDeviceWeights &weights, const QwenEngineOptions &options) {
@@ -136,9 +140,15 @@ namespace {
     e._decode_specialized = options.dsl_decode_specialized;
     e._weights = &weights;
     e._device = device;
+    e._stream = stream;
 
     if (auto s = e.resolve_weights(model, weights); !s.ok()) {
-        return Result<luisa::unique_ptr<QwenEngine, QwenDslEngine::Deleter>>::failure(std::move(s));
+        return Result<luisa::unique_ptr<QwenEngine, Deleter>>::failure(std::move(s));
+    }
+    if (options.dsl_cuda_graph && !e._benchmark &&
+        e._format == d::QwenWeightFormat::fp8_e4m3 &&
+        device.backend_name() == luisa::string_view{"cuda"}) {
+        e._cuda_graph_ext = device.extension<compute::CudaGraphExt>();
     }
     if (auto s = e.alloc_state(device); !s.ok()) {
         return Result<luisa::unique_ptr<QwenEngine, QwenDslEngine::Deleter>>::failure(std::move(s));
@@ -295,19 +305,16 @@ namespace {
     for (uint32_t l = 0; l < _layers; l++) {
         if (_layer_weights[l].full_attention) { full_count++; } else { gdn_count++; }
     }
-    _k_caches.reserve(full_count);
-    _v_caches.reserve(full_count);
     _gdn_states.reserve(gdn_count);
     _gdn_rings.reserve(gdn_count);
-    _cache_bytes = 0;
-    for (uint32_t i = 0; i < full_count; i++) {
-        auto k = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-        auto v = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-        if (!k || !v) { return err(StatusCode::out_of_memory, "KV cache allocation failed"); }
-        _k_caches.push_back(std::move(k));
-        _v_caches.push_back(std::move(v));
-        _cache_bytes += 2u * kv_elems * 4u;
+    if (auto s = _kv_cache.create(device, _stream, _max_context,
+                                  static_cast<uint32_t>(kv_n), full_count);
+        !s.ok()) {
+        return s;
     }
+    // Preserve the existing configured-capacity metric. Physical sparse
+    // residency is exposed separately by QwenKvCacheAllocator and grows with use.
+    _cache_bytes = _kv_cache.logical_bytes();
     for (uint32_t i = 0; i < gdn_count; i++) {
         auto st = device.create_buffer<float>(static_cast<size_t>(state_elems));
         auto ring = device.create_buffer<float>(static_cast<size_t>(ring_elems));
@@ -355,21 +362,10 @@ namespace {
     };
     _ids = mk_u(C);
     _ids_host = mk_u(C);
-    _positions = [&] {
-        auto b = device.create_buffer<int32_t>(static_cast<size_t>(C));
-        if (b) { _workspace_bytes += C * 4u; }
-        return b;
-    }();
-    _positions_host = [&] {
-        auto b = device.create_buffer<int32_t>(static_cast<size_t>(C));
-        if (b) { _workspace_bytes += C * 4u; }
-        return b;
-    }();
     // Host staging spans the FULL context: prefill records every chunk into
     // one command list, so each chunk's borrowed span must stay distinct and
     // unmodified until the single commit.
     _host_ids.resize(_max_context);
-    _host_pos.resize(_max_context);
     _hidden = mk_f(C * hidden);
     _normed = mk_f(C * hidden);
     _residual = mk_f(C * hidden);
@@ -405,7 +401,7 @@ namespace {
     _greedy_invalid = mk_u(d::qwen_greedy_argmax_blocks);
     _dummy_f = mk_f(1u);
     _dummy_u = mk_u(1u);
-    if (!_ids || !_ids_host || !_positions || !_positions_host || !_hidden || !_normed || !_residual || !_proj_a || !_proj_b ||
+    if (!_ids || !_ids_host || !_hidden || !_normed || !_residual || !_proj_a || !_proj_b ||
         !_proj_c || !_ffn_gate || !_ffn_up || !_ffn_act || !_attn_q || !_attn_gate || !_attn_k ||
         !_attn_v || !_attn_out || !_gdn_conv || !_gdn_q || !_gdn_k || !_gdn_beta || !_gdn_g ||
         !_gdn_out || !_gdn_w || !_gdn_vnew || !_gdn_normed || !_gdn_alpha || !_attn_proj_q || !_attn_proj_k || !_attn_proj_v ||
@@ -451,15 +447,12 @@ namespace {
     if (auto s = compile1(d::make_qwen_gemm_kernel(_format, d::QwenMatmulEpilogue::none), _gemm); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_gemm_kernel(_format, d::QwenMatmulEpilogue::residual), _gemm_residual); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_swiglu_split_kernel(), _swiglu); !s.ok()) { return s; }
-    if (_format == d::QwenWeightFormat::bf16) {
-        if (auto s = compile1(d::make_qwen_ffn_decode_kernel(_format), _ffn_decode); !s.ok()) { return s; }
-    }
+    if (auto s = compile1(d::make_qwen_ffn_decode_kernel(_format), _ffn_decode); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_zero_fill_kernel(), _zero_fill); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_copy_u_kernel(), _copy_u); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_greedy_argmax_partial_kernel(), _greedy_argmax_partial); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_greedy_argmax_finish_kernel(), _greedy_argmax_finish); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_copy_i_kernel(), _copy_i); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_attn_prepare_kernel(true), _attn_prepare); !s.ok()) { return s; }
+    if (auto s = compile1(d::make_qwen_attn_prepare_kernel(true, true), _attn_prepare); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_attn_prefill_kernel(), _attn_prefill); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_attn_decode_kernel(), _attn_decode); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_gdn_conv_silu_kernel(), _gdn_conv_sh); !s.ok()) { return s; }
@@ -477,10 +470,8 @@ namespace {
 // reset
 // ---------------------------------------------------------------------------
 [[nodiscard]] Status QwenDslEngine::reset(Stream &stream) {
-    // No queued command may still observe a state buffer or host staging span
-    // when reset starts overwriting it. This also makes repeated reset/prefill
-    // and error recovery deterministic instead of relying on prior downloads.
-    stream.synchronize();
+    // _kv_cache.reset() below drains queued work before any state buffer or
+    // host staging span is reused; do not add a duplicate stream sync here.
     // A standalone reset starts a fresh report. prefill clears before calling
     // reset and then appends its own samples, so reset work remains in TTFT.
     if (_benchmark) { _report.clear(); }
@@ -492,11 +483,13 @@ namespace {
                                           luisa::string{std::to_string(i)});
             }
         };
-        push("k_cache", _k_caches.size());
-        push("v_cache", _v_caches.size());
         push("gdn_state", _gdn_states.size());
         push("gdn_ring", _gdn_rings.size());
     }
+    // Decommit the old K/V tiles instead of zeroing the full configured
+    // maximum context. reset() waits for prior use and retires heaps through
+    // a stream completion callback; subsequent positions are written before read.
+    if (auto s = _kv_cache.reset(stream); !s.ok()) { return s; }
     auto batch = QwenCommandBatch{stream, _benchmark ? &_report : nullptr,
                                   QwenBenchmarkPhase::reset, 0u, 0u};
     size_t name_i = 0;
@@ -511,8 +504,6 @@ namespace {
         }
         return Status::success();
     };
-    for (auto &b : _k_caches) { if (auto s = zero(b); !s.ok()) { return s; } }
-    for (auto &b : _v_caches) { if (auto s = zero(b); !s.ok()) { return s; } }
     for (auto &b : _gdn_states) { if (auto s = zero(b); !s.ok()) { return s; } }
     for (auto &b : _gdn_rings) { if (auto s = zero(b); !s.ok()) { return s; } }
     batch.flush(true);// no-op when empty; single synchronize otherwise
@@ -605,26 +596,6 @@ namespace {
     return Status::success();
 }
 
-[[nodiscard]] Status QwenDslEngine::upload_positions(QwenCommandBatch &batch, uint32_t rows, uint32_t pos0) {
-    // Positions are a small deterministic ramp staged in a persistent host
-    // member and copied device-side (see stage_ids for the lifetime rule).
-    // Uploaded ONCE per forward_chunk; every full-attention layer reads the
-    // same _positions buffer for the chunk.
-    if (static_cast<uint64_t>(pos0) + rows > _host_pos.size()) {
-        return invalid("staging overflow: position rows");
-    }
-    for (uint32_t t = 0; t < rows; t++) { _host_pos[pos0 + t] = static_cast<int32_t>(pos0 + t); }
-    batch.annotate("positions_upload");
-    batch << _positions_host.view(0, rows).copy_from(luisa::span<const int32_t>{_host_pos.data() + pos0, rows});
-    auto plan = d::plan_qwen_threads(rows);
-    if (!plan.ok()) { return plan.status; }
-    if (!plan.value->empty()) {
-        batch.annotate("positions_copy");
-        batch << _copy_i(_positions_host.view(), _positions.view(), rows).dispatch(d::qwen_dispatch_threads(*plan.value));
-    }
-    return Status::success();
-}
-
 // ---------------------------------------------------------------------------
 // Full attention block.
 // ---------------------------------------------------------------------------
@@ -632,8 +603,8 @@ namespace {
                                                          uint32_t rows, uint32_t pos0) {
     const auto &lw = _layer_weights[layer];
     const uint32_t slot = _full_slot[layer];
-    const auto &kc = _k_caches[slot];
-    const auto &vc = _v_caches[slot];
+    const auto kc = _kv_cache.k_view(slot);
+    const auto vc = _kv_cache.v_view(slot);
     const uint32_t hd = _cfg.attn_head_dim;
     const uint32_t qh = _cfg.q_heads, kvh = _cfg.kv_heads;
     const uint32_t kv_n = _cfg.attn_kv_n();
@@ -651,9 +622,9 @@ namespace {
         if (!plan.ok()) { return plan.status; }
         const uint32_t q_rows = rows * qh, k_rows = rows * kvh, v_rows = rows * kvh;
         batch << _attn_prepare(_attn_proj_q.view(), _attn_proj_k.view(), _attn_proj_v.view(),
-                            lw.attn_q_norm->f32.view(), lw.attn_k_norm->f32.view(), _positions.view(),
+                            lw.attn_q_norm->f32.view(), lw.attn_k_norm->f32.view(), _ids_host.view().as<int32_t>(),
                             _attn_q.view(), _attn_gate.view(), _attn_k.view(), _attn_v.view(),
-                            kc.view(), vc.view(),
+                            kc, vc,
                             rows, qh, kvh, hd, _cfg.rope_dim, _cfg.rope_theta, _cfg.norm_eps,
                             pos0, _max_context, q_rows, k_rows, v_rows)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
@@ -665,7 +636,7 @@ namespace {
         auto plan = d::plan_qwen_attn_decode_dispatch(qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate(lw.p_attn_core);
-        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), kc.view(), vc.view(), _attn_out.view(),
+        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
                            qh, kvh, hd, _cfg.attn_scale(), kv_len, _max_context)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     } else {
@@ -673,7 +644,7 @@ namespace {
         auto plan = d::plan_qwen_attn_prefill_dispatch(rows, qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate(lw.p_attn_core);
-        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), kc.view(), vc.view(), _attn_out.view(),
+        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
                             rows, qh, kvh, hd, _cfg.attn_scale(), pos0, kv_len)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     }
@@ -814,7 +785,7 @@ namespace {
                              _normed.view(), _dummy_f.view(), rows, hidden, _cfg.norm_eps)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     }
-    if (rows == 1u && _decode_specialized && _format == d::QwenWeightFormat::bf16) {
+    if (rows == 1u && _decode_specialized) {
         // Decode fusion: gate GEMV + up GEMV + SwiGLU in one launch. The two
         // packed weight streams share each activation load and stay in FP32.
         batch.annotate(lw.p_swiglu);
@@ -845,11 +816,21 @@ namespace {
 // ---------------------------------------------------------------------------
 // Forward one chunk of `rows` tokens at absolute position pos0.
 // ---------------------------------------------------------------------------
-[[nodiscard]] Status QwenDslEngine::forward_chunk(QwenCommandBatch &batch, uint32_t rows, uint32_t pos0) {
+[[nodiscard]] Status QwenDslEngine::forward_chunk(Stream &stream, QwenCommandBatch &batch,
+                                                  uint32_t rows, uint32_t pos0) {
+    if (rows == 0u || pos0 > _max_context || rows > _max_context - pos0) {
+        return invalid("forward chunk exceeds sparse KV capacity");
+    }
+    // Growth only adds previously unmapped tiles. It is therefore safe for this
+    // map submission to precede commands already recorded in `batch`: those
+    // commands retain their existing tiles, and this chunk's maps precede its
+    // later kernel submission on the same stream.
+    if (auto s = _kv_cache.ensure_capacity(stream, pos0 + rows); !s.ok()) { return s; }
     const uint32_t hidden = _cfg.hidden;
     batch.layer(UINT32_MAX);// global (non-layer) commands until the first block
-    // Position ramp: uploaded ONCE per chunk, shared by every attention layer.
-    if (auto s = upload_positions(batch, rows, pos0); !s.ok()) { return s; }
+    // The engine's positions are exactly pos0 + row. The attention-prepare
+    // specialization derives them in-kernel, eliminating per-chunk H2D/copy
+    // commands and keeping decode graphs free of host-upload staging.
     // Embedding gather: hidden = table[ids].
     batch.annotate("embedding");
     {
@@ -940,7 +921,7 @@ namespace {
             _has_session = false;
             return s;
         }
-        if (auto s = forward_chunk(batch, rows, pos0); !s.ok()) {
+        if (auto s = forward_chunk(stream, batch, rows, pos0); !s.ok()) {
             _has_session = false;// a partial forward may have advanced device state
             return s;
         }
@@ -985,7 +966,7 @@ namespace {
         _has_session = false;
         return s;
     }
-    if (auto s = forward_chunk(batch, 1u, pos0); !s.ok()) {
+    if (auto s = forward_chunk(stream, batch, 1u, pos0); !s.ok()) {
         _has_session = false; // a partial forward may have advanced device state
         return s;
     }
@@ -1001,6 +982,40 @@ namespace {
     batch.flush(true);
     _position = pos0 + 1u;
     _greedy_next_valid = false;
+    return Status::success();
+}
+
+[[nodiscard]] Status QwenDslEngine::launch_device_greedy_graph(
+    Stream &stream, QwenCommandBatch &batch) {
+    auto list = batch.take_commands();
+    if (list.empty()) { return invalid("device greedy graph command list is empty"); }
+    if (!_device_greedy_graph_exec.has_value()) {
+        auto graph = _cuda_graph_ext->create_graph(std::move(list.commit()).command_list());
+        if (graph.handle().handle == compute::CudaGraphExt::invalid_handle) {
+            return err(StatusCode::unsupported,
+                       "CUDA graph capture failed for FP8 device greedy decode");
+        }
+        auto exec = _cuda_graph_ext->instantiate(graph.handle().handle);
+        if (exec.handle().handle == compute::CudaGraphExt::invalid_handle) {
+            return err(StatusCode::unsupported,
+                       "CUDA graph instantiation failed for FP8 device greedy decode");
+        }
+        _device_greedy_graph.emplace(std::move(graph));
+        _device_greedy_graph_exec.emplace(std::move(exec));
+    } else {
+        compute::CudaGraphExt::GraphUpdateError error;
+        if (!_cuda_graph_ext->update(_device_greedy_graph_exec->handle().handle,
+                                     std::move(list.commit()).command_list(), &error)) {
+            return err(StatusCode::internal_error,
+                       "CUDA graph update failed for FP8 device greedy decode",
+                       "node " + luisa::string{std::to_string(error.error_node)} +
+                           ", type " + luisa::string{std::to_string(static_cast<uint32_t>(error.type))} +
+                           ": " + error.detail);
+        }
+        _cuda_graph_updates++;
+    }
+    _cuda_graph_ext->launch(_device_greedy_graph_exec->handle().handle, stream.handle());
+    _cuda_graph_steps++;
     return Status::success();
 }
 
@@ -1020,12 +1035,23 @@ namespace {
     auto batch = QwenCommandBatch{stream, _benchmark ? &_report : nullptr,
                                   QwenBenchmarkPhase::decode, pos0, 1u};
     if (input_token != nullptr) {
-        if (auto s = stage_ids(batch, luisa::span<const uint32_t>{input_token, 1}); !s.ok()) {
+        if (_cuda_graph_ext != nullptr) {
+            // Host upload commands stay outside the updated graph. This avoids
+            // releasing replaced graph staging while an earlier launch is in
+            // flight; stream order still makes ids visible to the graph body.
+            auto upload = QwenCommandBatch{stream, nullptr,
+                                           QwenBenchmarkPhase::decode, pos0, 1u};
+            if (auto s = stage_ids(upload, luisa::span<const uint32_t>{input_token, 1}); !s.ok()) {
+                _has_session = false;
+                return s;
+            }
+            upload.flush(false);
+        } else if (auto s = stage_ids(batch, luisa::span<const uint32_t>{input_token, 1}); !s.ok()) {
             _has_session = false;
             return s;
         }
     }
-    if (auto s = forward_chunk(batch, 1u, pos0); !s.ok()) {
+    if (auto s = forward_chunk(stream, batch, 1u, pos0); !s.ok()) {
         _has_session = false;
         return s;
     }
@@ -1053,8 +1079,17 @@ namespace {
                                    _cfg.vocab, history_slot)
                  .dispatch(d::qwen_dispatch_threads(*finish_plan.value));
     // Do not synchronize: the next in-flight step reads _ids produced above.
-    // Stream order protects all reused activation/state buffers.
-    batch.flush(false);
+    // Stream order protects all reused activation/state buffers. Graph capture
+    // or update consumes the list, so failures are returned without a fallback
+    // submission of a potentially consumed command sequence.
+    if (_cuda_graph_ext != nullptr) {
+        if (auto s = launch_device_greedy_graph(stream, batch); !s.ok()) {
+            _has_session = false;
+            return s;
+        }
+    } else {
+        batch.flush(false);
+    }
     _position = pos0 + 1u;
     _greedy_next_valid = true;
     return Status::success();
@@ -1096,6 +1131,8 @@ namespace {
     i.cache_bytes = _cache_bytes;
     i.workspace_bytes = _workspace_bytes;
     i.compiled_shader_count = _shader_count;
+    i.cuda_graph_steps = _cuda_graph_steps;
+    i.cuda_graph_updates = _cuda_graph_updates;
     i.gdn_wy_ut = _gdn_wy_ut;
     return i;
 }

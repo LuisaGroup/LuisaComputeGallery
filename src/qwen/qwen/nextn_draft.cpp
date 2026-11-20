@@ -260,6 +260,10 @@ struct ResolvedNextn {
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
+QwenNextnDraft::~QwenNextnDraft() noexcept {
+    if (_stream) { _stream.synchronize(); }
+}
+
 [[nodiscard]] Result<QwenNextnDraft::Ptr> QwenNextnDraft::create(
     Device &device, Stream &stream, const Qwen35Model &model,
     const QwenDeviceTensor &target_embedding, const QwenDeviceWeights &draft_weights,
@@ -299,6 +303,7 @@ struct ResolvedNextn {
     e._format = resolved.value->format;
     e._weights = &draft_weights;
     e._device = device;
+    e._stream = stream;
     e._embd = resolved.value->embd;
     e._head = resolved.value->head;
     e._dedicated_embeddings = resolved.value->dedicated_embeddings;
@@ -339,12 +344,12 @@ struct ResolvedNextn {
     if (kv_elems > 0xFFFFFFFFull) {
         return invalid("draft KV element count exceeds the uint32 kernel envelope");
     }
-    auto k = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-    auto v = device.create_buffer<float>(static_cast<size_t>(kv_elems));
-    if (!k || !v) { return err(StatusCode::out_of_memory, "draft KV cache allocation failed"); }
-    _k_cache = std::move(k);
-    _v_cache = std::move(v);
-    _cache_bytes = 2u * kv_elems * 4u;
+    if (auto s = _kv_cache.create(device, _stream, _max_context,
+                                  static_cast<uint32_t>(_cfg.attn_kv_n()), 1u);
+        !s.ok()) {
+        return s;
+    }
+    _cache_bytes = _kv_cache.logical_bytes();
     return Status::success();
 }
 
@@ -442,7 +447,6 @@ struct ResolvedNextn {
     if (auto s = compile1(d::make_qwen_gemm_kernel(_format, d::QwenMatmulEpilogue::none), _gemm); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_gemm_kernel(_format, d::QwenMatmulEpilogue::residual), _gemm_residual); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_swiglu_split_kernel(), _swiglu); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_zero_fill_kernel(), _zero_fill); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_copy_u_kernel(), _copy_u); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_copy_i_kernel(), _copy_i); !s.ok()) { return s; }
     if (auto s = compile1(make_nextn_concat_half_kernel(), _concat_half); !s.ok()) { return s; }
@@ -456,24 +460,10 @@ struct ResolvedNextn {
 // reset
 // ---------------------------------------------------------------------------
 [[nodiscard]] Status QwenNextnDraft::reset(Stream &stream) {
-    // No queued command may still observe the K/V cache when it is cleared.
-    stream.synchronize();
-    auto batch = QwenCommandBatch{stream, nullptr, QwenBenchmarkPhase::reset, 0u, 0u};
-    const auto zero = [&](Buffer<float> &buf) -> Status {
-        const auto n = u32(buf.size(), "reset buffer size");
-        if (!n.ok()) { return n.status; }
-        auto plan = d::plan_qwen_threads(buf.size());
-        if (!plan.ok()) { return plan.status; }
-        if (!plan.value->empty()) {
-            batch.annotate("nextn.reset_cache");
-            batch << _zero_fill(buf.view(), *n.value).dispatch(d::qwen_dispatch_threads(*plan.value));
-        }
-        return Status::success();
-    };
-    if (auto s = zero(_k_cache); !s.ok()) { return s; }
-    if (auto s = zero(_v_cache); !s.ok()) { return s; }
-    batch.flush(true);
-    return Status::success();
+    // No zero-fill pass: old physical tiles are unmapped and their heaps are
+    // retired only after the final in-flight use. New rows are appended before
+    // any attention read, so stale/unmapped contents are never observable.
+    return _kv_cache.reset(stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +596,8 @@ struct ResolvedNextn {
     const uint32_t ffn = _cfg.ffn;
     const uint32_t hd = _cfg.attn_head_dim;
     const uint32_t qh = _cfg.q_heads, kvh = _cfg.kv_heads;
+    const auto kc = _kv_cache.k_view(0u);
+    const auto vc = _kv_cache.v_view(0u);
     // Snapshot the block input as the residual stream; normed input in one pass.
     auto np = d::plan_qwen_rmsnorm_dispatch(rows, hidden);
     if (!np.ok()) { return np.status; }
@@ -627,7 +619,7 @@ struct ResolvedNextn {
         batch << _attn_prepare(_attn_proj_q.view(), _attn_proj_k.view(), _attn_proj_v.view(),
                                _draft.attn_q_norm->f32.view(), _draft.attn_k_norm->f32.view(), _positions.view(),
                                _attn_q.view(), _attn_gate.view(), _attn_k.view(), _attn_v.view(),
-                               _k_cache.view(), _v_cache.view(),
+                               kc, vc,
                                rows, qh, kvh, hd, _cfg.rope_dim, _cfg.rope_theta, _cfg.norm_eps,
                                pos0, _max_context, q_rows, k_rows, v_rows)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
@@ -638,7 +630,7 @@ struct ResolvedNextn {
         auto plan = d::plan_qwen_attn_decode_dispatch(qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate("nextn.attn_decode");
-        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), _k_cache.view(), _v_cache.view(), _attn_out.view(),
+        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
                               qh, kvh, hd, _cfg.attn_scale(), kv_len, _max_context)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     } else {
@@ -646,7 +638,7 @@ struct ResolvedNextn {
         auto plan = d::plan_qwen_attn_prefill_dispatch(rows, qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate("nextn.attn_prefill");
-        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), _k_cache.view(), _v_cache.view(), _attn_out.view(),
+        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
                                rows, qh, kvh, hd, _cfg.attn_scale(), pos0, kv_len)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     }
@@ -721,7 +713,7 @@ struct ResolvedNextn {
     if (target_hidden_history.size() < static_cast<size_t>(P) * hidden) {
         return invalid("target_hidden_history is smaller than [history_rows, hidden]");
     }
-    if (!_k_cache || !_v_cache) { return err(StatusCode::internal_error, "draft state is not allocated"); }
+    if (!_kv_cache.valid()) { return err(StatusCode::internal_error, "draft state is not allocated"); }
 
     // Host outputs. The logits view aliases _host_logits; resize keeps the
     // storage persistent across rounds (may reallocate on growth; the view
@@ -733,6 +725,7 @@ struct ResolvedNextn {
     // Every propose() rebuilds the draft state from scratch (correctness
     // first): clear the K/V cache before recording this round.
     if (auto s = reset(stream); !s.ok()) { return s; }
+    if (auto s = _kv_cache.ensure_capacity(stream, P + draft_depth); !s.ok()) { return s; }
 
     // Stage the SHIFTED history ids [done, done+rows): row i consumes
     // target_tokens[i+1], and the last history row consumes pending_token.

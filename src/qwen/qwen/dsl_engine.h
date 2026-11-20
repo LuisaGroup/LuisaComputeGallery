@@ -10,7 +10,7 @@
 // input RMSNorm (direct pre-added GGUF weight; the HF zero-centered 1+w
 // conversion happened offline in the converter)
 //   -> full attention (q/k/v projections, fused Q/gate split + QK norm +
-//      partial NeoX rotate-half RoPE, contiguous per-layer FP32 KV cache, causal
+//      partial NeoX rotate-half RoPE, sparsely backed per-layer FP32 KV cache, causal
 //      GQA prefill / block-cooperative decode with sigmoid output gate,
 //      output projection with fused residual epilogue into hidden)
 //      OR GDN (packed QKV + z + alpha + beta projections, depthwise conv4 +
@@ -25,10 +25,11 @@
 // Final: output_norm (direct pre-added weight) on the LAST position only, then the tied
 // token_embd LM head for that single position -> FP32 logits [vocab].
 //
-// State: one contiguous FP32 K and V cache per full-attention layer
-// ([max_context, kv_heads, head_dim] each), one FP32 recurrent state
+// State: one sparse virtual allocation with an on-demand FP32 K and V region
+// per full-attention layer ([max_context, kv_heads, head_dim] each), one FP32 recurrent state
 // ([v_heads, head_dim, head_dim]) and one conv ring ([qkv_channels,
-// kernel-1]) per GDN layer. reset() clears all of them and the position.
+// kernel-1]) per GDN layer. reset() clears logical state, releases KV physical
+// residency, and zeroes the fixed GDN state/ring buffers.
 // Prefill processes the prompt in chunks of options.prefill_chunk rows. GDN
 // uses the FP32 WY representation + UT transform over serial 64-token chunks
 // by default; options.dsl_gdn_wy_ut=false selects the exact per-token recurrence
@@ -39,21 +40,27 @@
 // every packed matrix (dense F32 tensors stay F32 in both variants); a mixed
 // or unsupported storage is a recoverable failure, never a substitution.
 //
-// All kernels are compiled ONCE at construction (shapes are static); every
-// prefill/decode step is recorded into ONE QwenCommandBatch (a CommandList
-// wrapper) per public call and submitted with a single synchronize only when
-// the logits are downloaded. With options.benchmark=true the batch instead
+// All kernels are compiled ONCE at construction (shapes are static); compute
+// and transfer commands for each prefill/decode step use ONE QwenCommandBatch
+// (a CommandList wrapper) per public call and synchronize only when logits are
+// downloaded. Sparse tile maps are separate ordered stream events issued before
+// dependent kernels; normal growth adds no host synchronization. With options.benchmark=true the batch instead
 // commits + synchronizes after EVERY annotated command and records host-wall
 // samples into the engine-owned QwenBenchmarkReport exposed through
 // benchmark_report(). Greedy CUDA also supports bounded in-flight decode: device
-// argmax feeds the next token and only chunk downloads synchronize. Recoverable
-// Status everywhere; no exceptions, no RTTI.
+// argmax feeds the next token and only chunk downloads synchronize. FP8 CUDA
+// captures the device-only step as a graph; token uploads remain pre-graph events,
+// and position ramps are derived from pos0 + row without host staging. MTP,
+// benchmark mode, BF16, and non-CUDA paths retain ordinary command lists.
+// Recoverable Status everywhere; no exceptions, no RTTI.
 
 #include <cstdint>
 
 #include <luisa/core/stl/memory.h>
+#include <luisa/core/stl/optional.h>
 #include <luisa/core/stl/string.h>
 #include <luisa/core/stl/vector.h>
+#include <luisa/backends/ext/cuda/cuda_graph_ext.h>
 #include <luisa/runtime/buffer.h>
 #include <luisa/runtime/command_list.h>
 #include <luisa/runtime/device.h>
@@ -63,6 +70,7 @@
 #include "qwen/benchmark.h"
 #include "qwen/dsl_ops.h"
 #include "qwen/engine.h"
+#include "qwen/kv_cache_allocator.h"
 #include "qwen/model.h"
 #include "qwen/weights.h"
 
@@ -90,7 +98,9 @@ public:
         const Qwen35Model &model, const QwenDeviceWeights &weights,
         const QwenEngineOptions &options);
 
-    ~QwenDslEngine() noexcept override = default;
+    // Drain before ANY GPU child member is destroyed. In particular this
+    // covers bounded in-flight device-greedy decode at engine teardown.
+    ~QwenDslEngine() noexcept override;
 
     [[nodiscard]] Status reset(compute::Stream &stream) override;
     [[nodiscard]] Status prefill(compute::Stream &stream,
@@ -134,6 +144,7 @@ private:
     // GPU children first. Retaining the handle also makes device-first caller
     // teardown safe, matching QwenTileEngine's lifetime contract.
     compute::Device _device;
+    compute::Stream _stream;
 
     // ---- per-layer resolved weight pointers (into *_weights) --------------
     struct LayerWeights {
@@ -171,9 +182,9 @@ private:
     const QwenDeviceTensor *_output_norm{nullptr};
 
     // ---- persistent device state ------------------------------------------
-    // Full attention: one contiguous K and V cache per full layer.
-    luisa::vector<compute::Buffer<float>> _k_caches;// [full_layers]
-    luisa::vector<compute::Buffer<float>> _v_caches;
+    // Full attention: one sparse virtual buffer, with stable dense-addressing
+    // K/V views per full layer and physical tiles committed on demand.
+    QwenKvCacheAllocator _kv_cache;
     // GDN: one recurrent state and one conv ring per GDN layer.
     luisa::vector<compute::Buffer<float>> _gdn_states;// [gdn_layers]
     luisa::vector<compute::Buffer<float>> _gdn_rings;
@@ -184,16 +195,14 @@ private:
     // ---- activation workspace (reused across layers/chunks) ---------------
     compute::Buffer<uint32_t> _ids;       // [chunk] token ids
     compute::Buffer<uint32_t> _ids_host;  // [chunk] device-side staging for ids
-    compute::Buffer<int32_t> _positions;  // [chunk] absolute positions
-    compute::Buffer<int32_t> _positions_host;// [chunk] device-side staging for positions
     // Persistent host staging for scalar uploads. copy_from(span) borrows the
-    // host pointer until the command encoder commits, so the storage must
-    // outlive every queued CommandList (never a function-local vector).
+    // host pointer until the command encoder commits, so this storage must
+    // outlive queued commands; ids are then copied with a device-side kernel.
     // Sized to max_context: a prefill records ALL chunks into ONE command
     // list, so every chunk keeps a DISTINCT span [_staged, _staged+rows) that
-    // is never rewritten before the single commit.
+    // is never rewritten before the single commit. Positions need no staging:
+    // the engine specialization derives its contiguous ramp from pos0 + row.
     luisa::vector<uint32_t> _host_ids;
-    luisa::vector<int32_t> _host_pos;
     uint32_t _staged{0};// next unused staging slot within the current call
     compute::Buffer<float> _hidden;       // [chunk, hidden] current activation
     compute::Buffer<float> _normed;       // [chunk, hidden] norm output
@@ -272,7 +281,6 @@ private:
     compute::Shader<1, compute::Buffer<float>, compute::Buffer<uint32_t>,
                     compute::Buffer<uint32_t>, compute::Buffer<uint32_t>,
                     compute::Buffer<uint32_t>, uint32_t, uint32_t> _greedy_argmax_finish;
-    compute::Shader<1, compute::Buffer<int32_t>, compute::Buffer<int32_t>, uint32_t> _copy_i;
     compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<float>,
                     compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<int32_t>,
                     compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<float>,
@@ -314,6 +322,9 @@ private:
     bool _has_session{false};
     bool _gdn_wy_ut{true};
     bool _decode_specialized{true};
+    compute::CudaGraphExt *_cuda_graph_ext{nullptr};// non-owning; device extension
+    uint64_t _cuda_graph_steps{0};
+    uint64_t _cuda_graph_updates{0};
     uint64_t _cache_bytes{0};
     uint64_t _workspace_bytes{0};
     uint64_t _shader_count{0};
@@ -325,8 +336,10 @@ private:
     [[nodiscard]] Status resolve_weights(const Qwen35Model &model, const QwenDeviceWeights &weights);
     // Run the full 32-layer stack over `rows` tokens starting at absolute
     // position `pos0`, leaving the last-position hidden state in _hidden.
-    // Records into `batch`; in normal mode nothing is submitted here.
-    [[nodiscard]] Status forward_chunk(QwenCommandBatch &batch, uint32_t rows, uint32_t pos0);
+    // Records compute into `batch`; sparse map updates may be submitted on
+    // `stream` before the new tiles are used, but ordinary compute stays batched.
+    [[nodiscard]] Status forward_chunk(compute::Stream &stream, QwenCommandBatch &batch,
+                                       uint32_t rows, uint32_t pos0);
     [[nodiscard]] Status full_attention_block(QwenCommandBatch &batch, uint32_t layer,
                                               uint32_t rows, uint32_t pos0);
     [[nodiscard]] Status gdn_block(QwenCommandBatch &batch, uint32_t layer, uint32_t rows, uint32_t pos0);
@@ -341,13 +354,18 @@ private:
                                  const compute::Buffer<float> &y, uint32_t rows,
                                  const compute::Buffer<float> *residual,
                                  luisa::string_view label);
-    // Upload the position ramp ONCE per forward_chunk (not per attention layer).
-    [[nodiscard]] Status upload_positions(QwenCommandBatch &batch, uint32_t rows, uint32_t pos0);
     // Stage token ids into a distinct _host_ids span and copy device-side into
     // _ids (see the staging-lifetime note on _host_ids).
     [[nodiscard]] Status stage_ids(QwenCommandBatch &batch, luisa::span<const uint32_t> ids);
+    [[nodiscard]] Status launch_device_greedy_graph(
+        compute::Stream &stream, QwenCommandBatch &batch);
     // Annotation for a projection: <label>.<weight tensor name>.
     [[nodiscard]] static luisa::string proj_name(luisa::string_view label, const QwenDeviceTensor &w);
+
+    // Declared last: drained by the destructor body, then destroyed before all
+    // shaders, buffers, the retained stream, and the device extension owner.
+    luisa::optional<compute::CudaGraphInstance> _device_greedy_graph;
+    luisa::optional<compute::CudaGraphExecInstance> _device_greedy_graph_exec;
 };
 
 }// namespace luisa::qwen

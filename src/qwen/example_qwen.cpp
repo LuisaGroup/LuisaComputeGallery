@@ -97,6 +97,7 @@ struct CliArgs {
     bool chat{false};
     bool gdn_recurrent{false};
     bool benchmark{false};
+    bool cuda_graph{true};
     bool mtp_test{false};
     bool mtp{false};
     uint32_t draft_depth{2};
@@ -135,6 +136,7 @@ void print_usage() {
         "                          (non-thinking default; --prompt only)\n"
         "  --max-new-tokens <n> generated-token budget (default 32)\n"
         "  --decode-flight <n> greedy CUDA DSL forwards per sync (default 4; 0 disables)\n"
+        "  --no-cuda-graph        disable FP8 CUDA whole-step graph replay (A/B/debug)\n"
         "  --temperature <t> 0 = greedy argmax (default); >0 = categorical sampling\n"
         "  --seed <n>              sampling seed; reproducible by generated-token index\n"
         "  --max-context <n>       KV capacity (default 4096 dsl / 64 tile, <= 262144)\n"
@@ -263,6 +265,8 @@ void print_versions() {
             args.gdn_recurrent = true;
         } else if (a == "--benchmark") {
             args.benchmark = true;
+        } else if (a == "--no-cuda-graph") {
+            args.cuda_graph = false;
         } else if (a == "--benchmark-csv") {
             luisa::string_view v;
             if (!next(v)) { return false; }
@@ -674,8 +678,9 @@ const char *&argv0_holder() {
         options.kernel = spec->kernel;
         options.max_context = max_context;
         options.prefill_chunk = prefill_chunk;
-        options.dsl_gdn_wy_ut = !args.gdn_recurrent;
-        options.benchmark = args.benchmark || args.have_benchmark_csv;
+    options.dsl_gdn_wy_ut = !args.gdn_recurrent;
+    options.dsl_cuda_graph = args.cuda_graph;
+    options.benchmark = args.benchmark || args.have_benchmark_csv;
         const auto t_compile = std::chrono::steady_clock::now();
         QwenEnginePtr engine;
         QwenMtpExecutor::Ptr mtp;
@@ -931,8 +936,10 @@ const char *&argv0_holder() {
                     options.benchmark ? " | per-kernel samples include sync overhead" : "");
         {
             const auto info = engine_ptr->info();
-            std::printf("engine final: position=%u shaders=%llu\n", info.position,
-                        static_cast<unsigned long long>(info.compiled_shader_count));
+        std::printf("engine final: position=%u shaders=%llu cuda-graph-steps=%llu updates=%llu\n",
+                    info.position, static_cast<unsigned long long>(info.compiled_shader_count),
+                    static_cast<unsigned long long>(info.cuda_graph_steps),
+                    static_cast<unsigned long long>(info.cuda_graph_updates));
         }
         // Teardown: complete GPU work, then let the allocator-matched engine
         // handle leave scope before weights, stream and device are released.

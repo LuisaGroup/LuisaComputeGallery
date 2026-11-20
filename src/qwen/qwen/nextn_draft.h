@@ -85,6 +85,7 @@
 #include "qwen/common.h"
 #include "qwen/dsl_ops.h"
 #include "qwen/engine.h"
+#include "qwen/kv_cache_allocator.h"
 #include "qwen/model.h"
 #include "qwen/speculative.h"
 #include "qwen/weights.h"
@@ -137,13 +138,17 @@ public:
     // trunk's tied token_embd tensor (used for draft embeddings and the LM
     // head unless dedicated blk.32.token_embd/output are present);
     // `draft_weights` carries the blk.<layers>.* set. Both weight sources are
-    // BORROWED and must outlive the draft. `chunk` is the history-prefill row
+    // BORROWED and must outlive the draft. The creation stream is retained;
+    // reset()/propose() must use that same stream for sparse residency ordering.
+    // `chunk` is the history-prefill row
     // batch (activation memory/launch tradeoff, >= 1).
     [[nodiscard]] static Result<Ptr> create(compute::Device &device, compute::Stream &stream,
                                             const Qwen35Model &model,
                                             const QwenDeviceTensor &target_embedding,
                                             const QwenDeviceWeights &draft_weights,
                                             uint32_t max_context, uint32_t chunk);
+
+    ~QwenNextnDraft() noexcept;
 
     // Clear the draft K/V cache. Synchronizes before returning.
     [[nodiscard]] Status reset(compute::Stream &stream);
@@ -196,6 +201,7 @@ private:
     // GPU children first; retaining the handle also makes device-first caller
     // teardown safe (same lifetime contract as QwenDslEngine).
     compute::Device _device;
+    compute::Stream _stream;
 
     // ---- resolved draft tensors (into *_weights / target embedding) --------
     struct DraftWeights {
@@ -222,11 +228,9 @@ private:
     bool _dedicated_head{false};
 
     // ---- persistent device state -------------------------------------------
-    // The draft block owns exactly ONE contiguous FP32 K and V cache
-    // ([max_context, kv_heads, head_dim] each); propose() clears and rebuilds
-    // them every round.
-    compute::Buffer<float> _k_cache;
-    compute::Buffer<float> _v_cache;
+    // The draft block owns one K/V pair in the same sparse allocator as the
+    // target engines; propose() drops residency and rebuilds it every round.
+    QwenKvCacheAllocator _kv_cache;
     uint64_t _cache_bytes{0};
 
     // ---- activation workspace (chunk-sized, reused per round) --------------
@@ -292,7 +296,6 @@ private:
                     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> _gemm_residual;
     compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>,
                     compute::Buffer<float>, uint32_t> _swiglu;
-    compute::Shader<1, compute::Buffer<float>, uint32_t> _zero_fill;
     compute::Shader<1, compute::Buffer<uint32_t>, compute::Buffer<uint32_t>, uint32_t> _copy_u;
     compute::Shader<1, compute::Buffer<int32_t>, compute::Buffer<int32_t>, uint32_t> _copy_i;
     compute::Shader<2, compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<float>,

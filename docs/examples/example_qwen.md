@@ -5,7 +5,7 @@ Text-only, single-sequence Qwen3.5-4B inference on LuisaCompute: four explicitly
 | | |
 |---|---|
 | Group | qwen |
-| Sources | src/qwen/example_qwen.cpp, src/qwen/qwen/{engine,tokenizer,dsl_engine,tile_engine,dsl_ops,tile_ops,benchmark,mtp,nextn_draft,speculative,mtp_executor}.cpp, src/qwen/qwen/{common,gguf,model,weights}.cpp (reuses src/ocr/ocr/{tokenizer,detokenizer,status}.cpp) |
+| Sources | src/qwen/example_qwen.cpp, src/qwen/qwen/{engine,tokenizer,dsl_engine,tile_engine,dsl_ops,tile_ops,kv_cache_allocator,benchmark,mtp,nextn_draft,speculative,mtp_executor}.cpp, src/qwen/qwen/{common,gguf,model,weights}.cpp (reuses src/ocr/ocr/{tokenizer,detokenizer,status}.cpp) |
 | Backends | dsl: cuda, dx, vk; tile: dx, vk (real-model inference and device suite); Tile CUDA is unavailable in this build |
 | Build | xmake build example_qwen |
 | Run | example_qwen --list-versions (offline) / example_qwen --backend cuda --prompt "Hello" --temperature 0.8 --seed 42 |
@@ -31,8 +31,8 @@ Backend status (verified state, not a live support probe)
 
 | Variant | cuda | dx | vk |
 |---|---|---|---|
-| dsl-bf16 | real-GGUF inference; 467-check device suite | 467-check device suite | 467-check device suite |
-| dsl-fp8 | coherent real-GGUF chat; 467-check device suite | 467-check device suite | 467-check device suite |
+| dsl-bf16 | real-GGUF inference; 473-check device suite | 473-check device suite | 473-check device suite |
+| dsl-fp8 | coherent real-GGUF chat; 473-check device suite | 473-check device suite | 473-check device suite |
 | tile-bf16 / tile-fp8 | Tile route unavailable in this build | real-GGUF DSL-matching inference; 86-check device suite | 86-check device suite; repeated BF16 inference and a six-token-prefill + decode run completed cleanly |
 
 The original Tile-VK device-lost investigation isolated two different problems: an M=1 K-segment argument-count mismatch introduced during optimization, and a backend-sensitive M=1 MMA realization that could still lose the Vulkan device. The final executor uses one-row MMA on DX and a reduction realization on VK. Repeated short VK inference and a six-token-prefill + decode run are verified; long-run stability and performance remain separate gates. The installed older Vulkan validation layer also rejects newer NVIDIA device-feature structures, so `LUISA_VULKAN_VALIDATION=1` is not a usable validation configuration on this machine; Luisa's own validation layer works.
@@ -109,6 +109,7 @@ example_qwen --backend cuda --version dsl-bf16 --model combined.gguf --prompt "H
 | --chat | fixed Qwen user/assistant wrapper, --prompt only |
 | --max-new-tokens <n> | generated-token budget (default 32) |
 | --decode-flight <n> | greedy CUDA DSL forwards per bounded host sync (default 4; 0 restores synchronous host-logits decode) |
+| --no-cuda-graph | disable FP8 CUDA whole-step graph replay for A/B or debugging |
 | --temperature <t> | 0 = greedy; positive finite value = categorical sampling |
 | --seed <n> | unsigned 64-bit sampling seed |
 | --max-context <n> | KV capacity (default 4096 DSL / 64 Tile, ≤ 262144) |
@@ -125,7 +126,7 @@ example_qwen --backend cuda --version dsl-bf16 --model combined.gguf --prompt "H
 
 Benchmarking and command batching
 
-Normal DSL generation batches a whole decode and all prefill chunks into stream-ordered command lists. Greedy CUDA defaults to four in-flight decode steps per host synchronization: a DSL argmax writes the next device token, and only a small token-history range is downloaded. EOS is checked at each bounded chunk; any later work in that chunk is discarded. `--decode-flight 0` restores per-token full-logits download and host selection. Temperature sampling, MTP, and `--benchmark` always retain their reference synchronization behavior. Tile DX uses bounded commit-only lists; Tile VK retains conservative stage synchronization. `--benchmark` deliberately synchronizes every command and reports host-wall intervals, not hardware GPU timestamps. MTP adds draft proposal, hidden-history copies, snapshots, verify, possible restore/replay, and acceptance downloads, so its milliseconds per round must not be compared as though they were plain milliseconds per token.
+Normal DSL generation batches a whole decode and all prefill chunks into stream-ordered command lists. Greedy CUDA defaults to four in-flight decode steps per host synchronization: a DSL argmax writes the next device token, and only a small token-history range is downloaded. FP8 CUDA captures the device-only decode body as one CUDA graph and updates scalar arguments on subsequent steps. Chunk-boundary host token uploads remain ordinary ordered pre-graph commands; position ramps are derived in-kernel. The final engine line reports graph launch/update counts, and capture/update failures are returned without executing a consumed list. `--no-cuda-graph` selects the ordinary-list A/B path. EOS is checked at each bounded chunk; any later work in that chunk is discarded. `--decode-flight 0` restores per-token full-logits download and host selection. Temperature sampling, MTP, and `--benchmark` always retain their reference synchronization behavior. Tile DX uses bounded commit-only lists; Tile VK retains conservative stage synchronization. `--benchmark` deliberately synchronizes every command and reports host-wall intervals, not hardware GPU timestamps. MTP adds draft proposal, hidden-history copies, snapshots, verify, possible restore/replay, and acceptance downloads, so its milliseconds per round must not be compared as though they were plain milliseconds per token.
 
 For paired repeated ordinary-engine measurements use `scripts/benchmark_qwen.py`; raw logs and summaries are written under `.kimix_cache/qwen_benchmark/` by default. No MTP speedup or default-policy change is claimed without a real combined-checkpoint A/B that includes draft, verify, snapshot, restore, and replay costs.
 
@@ -147,6 +148,21 @@ Representative Nsight Compute `full` results (RTX 4080 SUPER, base-clock/cache-c
 
 The raw reports are under `.kimix_cache/qwen_dsl_opt/nsight/final_keys/`. Fused FFN is retained for its measured request-level launch/intermediate-traffic win, not a claim that its isolated kernel always beats two separate GEMVs.
 
+### FP8 bandwidth, fusion, and graph pass
+
+The current FP8 pass enables the same fused gate/up/SwiGLU route already used by BF16, removes DSL position upload/copy commands, and replays FP8 CUDA device-greedy decode through `CudaGraphExt`. The final paired cache-resistant FFN pipeline benchmark measured **0.08042 ms for two GEMVs plus SwiGLU versus 0.07540 ms fused**. On the real four-token prompt/eight-decode-step diagnostic configuration, FP8 improved from **8.55 to 8.03 ms/token** with identical IDs and **8 graph launches / 7 updates**; BF16 measured **13.98 ms/token** on its non-graph path. The final FP8/BF16 request-wall ratio is **1.74×**. These are short A/B diagnostics, not a broad latency distribution.
+
+Matched Nsight Compute `full` captures with cache flushing explain why halving E4M3 payload bytes does not produce an automatic 2× end-to-end result:
+
+| N=9216, K=2560 GEMV | DRAM read | Duration | DRAM bandwidth | DRAM utilization | Achieved occupancy |
+|---|---:|---:|---:|---:|---:|
+| BF16 generic | 47.205 MB | 69.376 µs | 680.43 GB/s | 94.65% | 91.65% |
+| FP8 specialized | 26.239 MB | 40.032 µs | 655.44 GB/s | 91.20% | 87.15% |
+
+The FP8 payload alone is 23.593 MB; the remaining measured traffic is FP32 scales and activation reads. Thus the actual byte-reduction ratio is about **1.80×**, and both kernels are already near the DRAM roof. Occupancy-only tuning cannot create a 2× whole-decode result under this ABI. A baseline Nsys timeline measured approximately **8.11 ms of kernels plus 0.62 ms of internal launch gaps per token** (~438 launches), which motivated graph replay.
+
+`benchmark_qwen_decode` provides checkpoint-free, cache-resistant shape sweeps, paired FFN measurements, and attention timings; the saved raw artifacts also include the block-size sweep. Vectorized loads, adjacent-row pairing, small dual-projection fusion, native FP8 conversion, block-size changes, and a second attention merge barrier were also tested; none produced a broad enough win to retain. Raw logs and Nsight reports are under `.kimix_cache/qwen_fp8_opt/`.
+
 Measured optimization snapshot
 
 Short one-token-prompt/two-token-output smokes on the RTX 4080 SUPER are correctness plus diagnostic measurements, not a statistically rigorous benchmark:
@@ -161,6 +177,18 @@ Short one-token-prompt/two-token-output smokes on the RTX 4080 SUPER are correct
 
 The main Tile changes are contiguous embedding tile loads (removing quadratic select-scans), a dedicated M=1 projection realization, and backend-specific DX MMA versus VK reduction selection. M=1 K-segment dispatch and shader-cache keys include the realization mode. Larger repeated benchmarks are still required before replacing the older long-form performance tables.
 
+Sparse KV-cache allocation
+
+Commit 0375b17 originally allocated one dense FP32 K buffer and one dense FP32 V buffer for each of the eight full-attention layers, sized to the entire configured `max_context`, and zeroed all sixteen buffers on reset. The current implementation centralizes this state in `QwenKvCacheAllocator`:
+
+- One `SparseBuffer<float>` reserves the complete maximum-context virtual capacity. It contains sixteen tile-aligned regions in `[K0,V0,K1,V1,...]` order. Each region still exposes exactly `[max_context, kv_heads * head_dim]` through a `BufferView<float>`.
+- Existing kernels and numerical addressing are unchanged: token `p`, channel `c` remains element `p * 1024 + c` within a layer's K or V view. There is no block table, prefix sharing, multi-request scheduler, or non-contiguous logical token order in this single-sequence example.
+- One `vector<SparseBufferHeap>` owns the physical tiles. `ensure_capacity(stream, pos0 + rows)` allocates and maps only newly required tiles in every K/V region. Stable virtual views and existing tile mappings preserve prior contents across growth; normal growth adds no host synchronization.
+- Reset does not clear maximum-context storage. After synchronizing the last possible use, it unmaps committed ranges and moves the retired heaps into a `CommandList` completion callback. The sparse virtual buffer remains available for remap. Engine teardown also drains the retained creation stream before any child resource is released.
+- All calls on an engine or NextN draft must use its creation stream. Sparse-mediated execution/reset paths reject a different stream rather than risking an unmapped in-flight cache. Backends without sparse-buffer support fail closed; no dense fallback is silently selected.
+
+The CUDA backend fix in `patches/luisa-cuda-sparse-buffer-tile-offset.patch` is required for more than one tile per buffer: `cuMemMap` now receives the tile-adjusted destination address and a zero offset into the one-tile heap. The previous call mistakenly applied the tile offset to the heap and left the destination at the buffer base.
+
 Memory and lifetime
 
 Approximate device memory for one sequence:
@@ -171,36 +199,43 @@ Approximate device memory for one sequence:
 | FP8 E4M3 weights + scales | ≈ 4.1 GiB |
 | GDN recurrent state | 48 MiB fixed |
 | GDN conv history | 2.25 MiB DSL; 4.5 MiB Tile ping-pong rings |
-| Full-attention KV cache | 64 KiB per token across eight layers |
+| Full-attention KV cache | 64 KiB logical payload per token across eight layers; physical residency is allocated on demand and rounded up to backend sparse tiles |
 | DSL WY/UT scratch | two `[prefill-chunk,32,128]` FP32 buffers (2 MiB at chunk 64) |
 | MTP hidden history | `max_context × 2560 × 4` bytes (40 MiB at 4096) |
 | MTP GDN snapshots | ≈ 50.25 MiB |
 | MTP verify logits | `(draft_depth+1) × vocab × 4` bytes |
 
-Both engines and the MTP objects retain their creating Device until after child buffers/shaders are destroyed. Reset synchronizes before state or staging reuse. Host upload spans are persistent or synchronized before destruction; in-flight token-history downloads synchronize before their host vectors are resized or reused. Device greedy selection preserves lowest-index ties and rejects NaN with a checked sentinel. WY scratch is engine-owned for the whole session. MTP snapshots/history use device-to-device copies, and replay never consumes the bonus. Weight-upload staging relies on immediate stream encoding; it must not be moved to deferred batches without changing ownership.
+Both engines and the MTP objects retain their creating Device and Stream until after child buffers/shaders are destroyed. `QwenEngineInfo::cache_bytes` remains the configured logical KV payload plus fixed GDN state, not current sparse physical residency; allocator accessors distinguish logical, virtual padded, and committed bytes. Reset synchronizes before state or staging reuse. Host upload spans are persistent or synchronized before destruction; in-flight token-history downloads synchronize before their host vectors are resized or reused. Device greedy selection preserves lowest-index ties and rejects NaN with a checked sentinel. WY scratch is engine-owned for the whole session. MTP snapshots/history use device-to-device copies, and replay never consumes the bonus. Weight-upload staging relies on immediate stream encoding; it must not be moved to deferred batches without changing ownership.
 
 Tests
 
 ```bat
 xmake build test_qwen_engine test_qwen_speculative test_qwen_gguf test_qwen_weights
-xmake build test_qwen_ops_dsl test_qwen_ops_tile test_qwen_mtp
+xmake build test_qwen_kv_cache test_qwen_ops_dsl test_qwen_ops_tile test_qwen_mtp
 build\windows\x64\release\test_qwen_engine.exe
 build\windows\x64\release\test_qwen_speculative.exe
+build\windows\x64\release\test_qwen_kv_cache.exe cuda
+build\windows\x64\release\test_qwen_kv_cache.exe dx
+build\windows\x64\release\test_qwen_kv_cache.exe vk
 build\windows\x64\release\test_qwen_ops_dsl.exe cuda
 build\windows\x64\release\test_qwen_ops_tile.exe vk
 build\windows\x64\release\test_qwen_mtp.exe cuda
 build\windows\x64\release\test_qwen_mtp.exe cuda zero
+build\windows\x64\release\test_qwen_mtp.exe cuda fp8-zero
 example_qwen --self-test
 ```
 
-Final optimized validation: **467 DSL operator checks pass on each of CUDA, DX, and VK**, and **36 MTP checks pass on each backend**. Host suites pass with 439 engine assertions, 367 speculative assertions, 223 GGUF assertions, and 3164 weight assertions; the offline self-test also passes. A real 33-token chat run produces identical IDs with `--decode-flight 0` and `4`. The final relinked BF16 executable reproduces 13.970 ms/token and 14.5–14.6 ms TTFT in the benchmark/smoke configuration.
+Sparse-cache validation: **49 allocator checks pass on each of CUDA, DX, and VK**, including multi-tile writes, growth with preserved data, reset/remap, rejection of a foreign stream, and reset/destruction after dispatched work. Real BF16 inference passes through sparse K/V on DSL CUDA (including four in-flight greedy forwards) and Tile DX with matching token IDs; the CUDA synthetic MTP suite passes **64 checks**. The `fp8-zero` synthetic engine probe adds **12 checks** for FP8 engine creation, prefill, four graph launches, three updates, and deterministic history without running the host quantizer.
+
+Final optimized validation: **473 DSL operator checks pass on each of CUDA, DX, and VK**, and **36 MTP checks pass on each backend**. Host suites pass with 439 engine assertions, 367 speculative assertions, 223 GGUF assertions, and 3164 weight assertions; the offline self-test also passes. A real 33-token chat run produces identical IDs with `--decode-flight 0` and `4`. The final relinked BF16 executable reproduces 13.970 ms/token and 14.5–14.6 ms TTFT in the benchmark/smoke configuration.
 
 Known limitations
 
 - Text only: no vision tower. Sampling currently has temperature only, not top-k/top-p.
+- Qwen now requires a sparse-buffer-capable backend. Small or heavily padded configurations can commit more physical bytes than their logical KV payload because residency is tile-granular; short sessions otherwise avoid committing the full maximum context.
 - The supplied GGUF has no NextN weights. Real-draft output quality and end-to-end acceleration are unmeasured; MTP is opt-in and the current draft re-prefill policy may be slower than plain decoding.
 - Tile GDN remains recurrent rather than WY/UT. Tile MTP is not implemented and never falls back silently to DSL.
 - Tile VK short inference is fixed and verified, but it is slow and long-run stress coverage is still needed. Tile CUDA is unavailable in this build.
 - MTP currently forces recurrent target GDN and the single-row reference numerics mode for verify/replay/plain-reference parity. Combining WY/UT target verify with one-row replay requires per-row chunk-state restoration.
-- FP8 remains lossy load-time E4M3 quantization of BF16, not a separately trained/validated FP8 checkpoint; token trajectories may diverge from BF16.
+- FP8 remains lossy load-time E4M3 quantization of BF16, not a separately trained/validated FP8 checkpoint; token trajectories may diverge from BF16. FP32 scales, FP32 activations, and fixed non-projection kernels mean a 2× end-to-end speedup over BF16 is not implied by the nominal weight-size ratio.
 - Exit codes: 0 success/help/list/self-test/mtp-test, 1 bad arguments, 2 engine/model refusal or generation failure.

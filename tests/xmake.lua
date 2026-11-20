@@ -251,11 +251,12 @@ for _, name in ipairs(qwen_host_tests) do
     })
 end
 
--- Qwen device operator regression tests: synthetic data only (no weights),
--- explicit backend argv[1] (dsl verified on cuda, tile on dx; vk optional).
+-- Qwen device regression tests: synthetic data only (no weights), explicit
+-- backend argv[1]. Sparse allocator verified on cuda/dx/vk; DSL on cuda, Tile on dx.
 --   xmake run test_qwen_ops_dsl cuda
 --   xmake run test_qwen_ops_tile dx
 local qwen_device_tests = {
+    "test_qwen_kv_cache",
     "test_qwen_ops_dsl",
     "test_qwen_ops_tile",
     "test_qwen_mtp",
@@ -289,4 +290,12 @@ gallery_test("benchmark_embed_gemm", {
     sources = {"benchmark/benchmark_embed_gemm.cpp"},
     deps = {"lc-example-embedding"},
     includes = {"$SRC", "$SRC/embedding"},
+})
+
+-- Cache-resistant packed GEMV sweep for Qwen3.5-4B single-token decode.
+--   xmake run benchmark_qwen_decode cuda --format both --impl both
+gallery_test("benchmark_qwen_decode", {
+    sources = {"benchmark/benchmark_qwen_decode.cpp"},
+    deps = {"lc-example-qwen"},
+    includes = {"$SRC/qwen", "$SRC/ocr"},
 })

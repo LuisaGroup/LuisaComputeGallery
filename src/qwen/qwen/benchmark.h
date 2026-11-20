@@ -11,6 +11,7 @@
 // presented as normal-mode GPU time.
 
 #include <cstdint>
+#include <utility>
 
 #include <luisa/core/clock.h>
 #include <luisa/core/stl/filesystem.h>
@@ -78,6 +79,12 @@ public:
     // both. It never creates an extra empty submission/synchronization.
     void flush(bool synchronize = true) noexcept;
     void clear() noexcept;
+    // Transfer a normal-mode list to a consumer such as CudaGraphExt. The
+    // caller takes ownership of command submission and any consumed-list error
+    // path. Per-command benchmark mode is empty by the time this is called.
+    [[nodiscard]] compute::CommandList take_commands() noexcept {
+        return std::move(_commands);
+    }
     [[nodiscard]] bool empty() const noexcept { return _commands.empty(); }
     [[nodiscard]] bool instrumented() const noexcept { return _report != nullptr; }
 

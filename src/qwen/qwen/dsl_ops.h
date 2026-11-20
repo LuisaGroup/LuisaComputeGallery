@@ -469,7 +469,8 @@ using QwenAttnPrepareKernel = compute::Kernel1D<void(
     uint32_t /*pos0*/, uint32_t /*cache_capacity*/,
     uint32_t /*q_rows = tokens*q_heads*/, uint32_t /*k_rows = tokens*kv_heads*/,
     uint32_t /*v_rows = tokens*kv_heads*/)>;
-[[nodiscard]] QwenAttnPrepareKernel make_qwen_attn_prepare_kernel(bool append_kv) noexcept;
+[[nodiscard]] QwenAttnPrepareKernel make_qwen_attn_prepare_kernel(
+    bool append_kv, bool implicit_position_ramp = false) noexcept;
 [[nodiscard]] Result<QwenLaunch1D> plan_qwen_attn_prepare_dispatch(uint64_t tokens, const QwenDslConfig &cfg);
 [[nodiscard]] Status validate_qwen_attn_prepare_inputs(uint64_t tokens, const QwenDslConfig &cfg,
                                                        uint64_t pos0, uint64_t cache_capacity, bool append_kv);

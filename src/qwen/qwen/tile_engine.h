@@ -29,11 +29,11 @@
 // Final: output_norm (direct pre-added weight) on the LAST position only, then the tied
 // token_embd LM head for that single position -> FP32 logits [vocab].
 //
-// State: one contiguous FP32 K and V cache per full-attention layer
-// ([max_context, kv_heads*head_dim] each), one FP32 recurrent state
+// State: one sparse virtual allocation with on-demand FP32 K/V regions per
+// full-attention layer ([max_context, kv_heads*head_dim] each), one FP32 recurrent state
 // ([v_heads, head_dim, head_dim]) and TWO ping-pong conv rings
-// ([qkv_channels, kernel-1] each) per GDN layer. reset() clears all of them
-// and the position. The conv runs ONE TOKEN AT A TIME through
+// ([qkv_channels, kernel-1] each) per GDN layer. reset() clears logical state,
+// releases KV physical residency, and zeroes the fixed GDN buffers. The conv runs ONE TOKEN AT A TIME through
 // capture_tile_gdn_conv_silu_step with separate ring_in/ring_out buffers:
 // token at absolute position pos reads ring[pos%2] and writes ring[(pos+1)%2]
 // (a full history copy with only slot pos%(kernel-1) overwritten). This
@@ -115,6 +115,7 @@
 
 #include "qwen/benchmark.h"
 #include "qwen/engine.h"
+#include "qwen/kv_cache_allocator.h"
 #include "qwen/model.h"
 #include "qwen/tile_ops.h"
 #include "qwen/weights.h"
@@ -172,7 +173,7 @@ public:
         const Qwen35Model &model, const QwenDeviceWeights &weights,
         const QwenTileEngineOptions &options);
 
-    ~QwenTileEngine() noexcept override = default;
+    ~QwenTileEngine() noexcept override;
 
     [[nodiscard]] Status reset(compute::Stream &stream) override;
     [[nodiscard]] Status prefill(compute::Stream &stream,
@@ -201,6 +202,7 @@ private:
     // ---- borrowed weights / device ----------------------------------------
     const QwenDeviceWeights *_weights{nullptr};
     compute::Device _device;// shared handle to the creating device
+    compute::Stream _stream;// retained for ordered engine teardown
     // Stage-boundary sync policy, detected once at create from
     // device.backend_name(). true (VK and every non-DX backend): QWEN_TS
     // stage flushes and every-N-layer flushes commit + synchronize, exactly
@@ -238,8 +240,8 @@ private:
     const QwenDeviceTensor *_output_norm{nullptr};
 
     // ---- persistent device state ------------------------------------------
-    luisa::vector<compute::Buffer<float>> _k_caches;// [full_layers]
-    luisa::vector<compute::Buffer<float>> _v_caches;
+    // Stable dense-addressing K/V views backed by on-demand sparse tiles.
+    QwenKvCacheAllocator _kv_cache;
     luisa::vector<compute::Buffer<float>> _gdn_states;// [gdn_layers]
     // Two ping-pong rings per GDN layer: _gdn_rings[2*slot + parity].
     luisa::vector<compute::Buffer<float>> _gdn_rings;

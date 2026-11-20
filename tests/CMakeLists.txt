@@ -255,14 +255,16 @@ foreach (_gallery_qwen_test IN ITEMS
             LABELS "unit;unit_qwen")
 endforeach ()
 
-# Qwen device operator regression tests (tests/integration/qwen): synthetic
-# data only (no checkpoint), explicit backend argument. Built always; CTest
+# Qwen device regression tests (tests/integration/qwen): synthetic data only
+# (no checkpoint), explicit backend argument. The sparse allocator is verified
+# on cuda/dx/vk. Built always; CTest
 # entries are added only when a backend is selected via LUISA_QWEN_DEVICE_BACKEND
 # (the tests fail without an explicit backend, so no default is registered).
 # cmake -DLUISA_QWEN_DEVICE_BACKEND=cuda ...   # dsl + tile
 set(LUISA_QWEN_DEVICE_BACKEND "" CACHE STRING
         "Backend argument for the Qwen device tests' CTest entries (empty = build only, no CTest entry)")
 foreach (_gallery_qwen_device_test IN ITEMS
+        test_qwen_kv_cache
         test_qwen_ops_dsl
         test_qwen_ops_tile
         test_qwen_mtp)
@@ -298,3 +300,9 @@ gallery_test(benchmark_embed_gemm NO_CTEST
         SOURCES "benchmark/benchmark_embed_gemm.cpp"
         DEPS lc-example-embedding
         INCLUDES "$SRC" "$SRC/embedding")
+
+# Cache-resistant packed GEMV sweep for Qwen3.5-4B single-token decode.
+gallery_test(benchmark_qwen_decode NO_CTEST
+        SOURCES "benchmark/benchmark_qwen_decode.cpp"
+        DEPS lc-example-qwen
+        INCLUDES "$SRC/qwen" "$SRC/ocr")

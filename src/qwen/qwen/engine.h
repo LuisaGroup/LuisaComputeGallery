@@ -5,6 +5,8 @@
 // logits. Implementations own request state; weights are borrowed and immutable.
 // Engines and their staging/session state are single-threaded objects: calls on
 // one engine and its associated GGUF upload/stream must be externally serialized.
+// Public execution/reset calls must use the same Stream supplied to create();
+// sparse KV residency and ordered teardown intentionally rely on that identity.
 
 #include <cstdint>
 #include <memory>
@@ -28,8 +30,9 @@ enum class QwenKernelKind : uint32_t {
 
 struct QwenEngineOptions {
     QwenKernelKind kernel{QwenKernelKind::dsl};
-    // Contiguous full-attention KV capacity. Must be >0 and <= the model's
-    // native context length. GDN state is fixed-size and allocated separately.
+    // Logical full-attention KV token capacity, reserved virtually and backed
+    // by sparse physical tiles on demand. Must be >0 and <= the model's native
+    // context length. GDN state is fixed-size and allocated separately.
     uint32_t max_context{4096};
     // Number of prompt rows per engine prefill call. DSL subdivides these rows
     // into serial 64-token WY/UT chunks; this is an activation/launch tradeoff.
@@ -43,6 +46,10 @@ struct QwenEngineOptions {
     // false so verify, accepted-prefix replay, and plain reference decode share
     // the original numerical path. Ordinary optimized decode keeps it true.
     bool dsl_decode_specialized{true};
+    // FP8 CUDA bounded device-greedy decode replays a whole-step graph when
+    // CudaGraphExt is available. Capture/update failures are recoverable and
+    // never execute a partially consumed list. Other variants are unchanged.
+    bool dsl_cuda_graph{true};
     // Opt-in command-level profiling. False keeps ordinary batched command
     // lists. True uses the supplied stream to commit + synchronize after every
     // kernel/transfer and exposes raw host-wall samples via benchmark_report().
@@ -55,9 +62,13 @@ struct QwenEngineInfo {
     uint32_t position{0};
     uint32_t max_context{0};
     uint32_t prefill_chunk{0};
+    // Configured logical KV payload + fixed GDN state bytes. Sparse alignment
+    // padding and time-varying physical residency are allocator properties.
     uint64_t cache_bytes{0};
     uint64_t workspace_bytes{0};
     uint64_t compiled_shader_count{0};
+    uint64_t cuda_graph_steps{0};
+    uint64_t cuda_graph_updates{0};
     bool gdn_wy_ut{false};
 };
 

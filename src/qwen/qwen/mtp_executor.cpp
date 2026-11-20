@@ -68,6 +68,7 @@ namespace {
     // Single-row decode specializations use different reduction orders from
     // multi-row verify. Keep target/replay/plain-reference numerics aligned.
     forced.dsl_decode_specialized = false;
+    forced.dsl_cuda_graph = false;
     auto target = QwenDslEngine::create(device, stream, model, trunk_weights, forced);
     if (!target.ok()) { return R::failure(target.status); }
 
@@ -155,7 +156,7 @@ namespace {
             t->_has_session = false;
             return s;
         }
-        if (auto s = t->forward_chunk(batch, rows, done); !s.ok()) {
+        if (auto s = t->forward_chunk(stream, batch, rows, done); !s.ok()) {
             t->_has_session = false;// a partial forward may have advanced device state
             return s;
         }
@@ -284,7 +285,7 @@ namespace {
         t->_has_session = false;
         return s;
     }
-    if (auto s = t->forward_chunk(batch, k + 1u, pos0); !s.ok()) {
+    if (auto s = t->forward_chunk(stream, batch, k + 1u, pos0); !s.ok()) {
         t->_has_session = false;// a partial forward may have advanced device state
         return s;
     }
@@ -365,7 +366,7 @@ namespace {
             t->_has_session = false;
             return s;
         }
-        if (auto s = t->forward_chunk(replay, a + 1u, pos0); !s.ok()) {
+        if (auto s = t->forward_chunk(stream, replay, a + 1u, pos0); !s.ok()) {
             t->_has_session = false;
             return s;
         }

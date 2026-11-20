@@ -1316,8 +1316,9 @@ namespace {
 
 }// namespace
 
-[[nodiscard]] QwenAttnPrepareKernel make_qwen_attn_prepare_kernel(bool append_kv) noexcept {
-    QwenAttnPrepareKernel kernel = [append_kv](
+[[nodiscard]] QwenAttnPrepareKernel make_qwen_attn_prepare_kernel(
+    bool append_kv, bool implicit_position_ramp) noexcept {
+    QwenAttnPrepareKernel kernel = [append_kv, implicit_position_ramp](
                                        BufferFloat q_proj, BufferFloat k_proj, BufferFloat v_proj,
                                        BufferFloat q_norm_w, BufferFloat k_norm_w, BufferInt positions,
                                        BufferFloat q_out, BufferFloat gate_out, BufferFloat k_out, BufferFloat v_out,
@@ -1349,8 +1350,10 @@ namespace {
             $if (kind != 0u) { heads = kv_heads; };
             const auto t = row / heads;
             const auto h = row % heads;
-            const auto pos = cast<float>(positions.read(t));
-            $if (kind == 0u) {
+        const auto pos = implicit_position_ramp
+                             ? cast<float>(pos0 + t)
+                             : cast<float>(positions.read(t));
+        $if (kind == 0u) {
                 // Q row: source stride 2*head_dim per head ([Q|gate]).
                 const auto src = (t * q_heads + h) * (2u * head_dim);
                 const auto dst = (t * q_heads + h) * head_dim;

@@ -42,7 +42,7 @@ template<typename T>
 
 [[nodiscard]] QwenDeviceTensor zero_tensor(
     Device &device, Stream &stream, const char *name,
-    luisa::vector<uint64_t> dims, bool dense) {
+    luisa::vector<uint64_t> dims, bool dense, bool fp8 = false) {
     QwenDeviceTensor tensor;
     tensor.role = QwenTensorRole::gdn_qkv;
     tensor.layer = 32u;
@@ -53,6 +53,11 @@ template<typename T>
     if (dense) {
         tensor.storage = WeightStorage::f32_dense;
         tensor.f32 = zero_buffer<float>(device, stream, tensor.element_count);
+    } else if (fp8) {
+        tensor.storage = WeightStorage::fp8_packed;
+        tensor.packed = zero_buffer<uint32_t>(device, stream, (tensor.element_count + 3u) / 4u);
+        tensor.groups_per_row = (tensor.dims[0] + 63u) / 64u;
+        tensor.scales = zero_buffer<float>(device, stream, tensor.groups_per_row * tensor.dims[1]);
     } else {
         tensor.storage = WeightStorage::bf16_packed;
         tensor.packed = zero_buffer<uint32_t>(device, stream, (tensor.element_count + 1u) / 2u);
@@ -61,14 +66,14 @@ template<typename T>
 }
 
 [[nodiscard]] QwenDeviceWeights make_zero_trunk(
-    Device &device, Stream &stream, const Qwen35Model &model) {
+    Device &device, Stream &stream, const Qwen35Model &model, bool fp8 = false) {
     luisa::vector<QwenDeviceTensor> tensors;
     for (const auto &ref : model.tensors()) {
         const auto &info = *ref.info;
         auto storage = classify_weight_storage(info.name, info.type, info.dims, false);
         if (!storage.ok()) { continue; }
         auto tensor = zero_tensor(device, stream, info.name.c_str(), info.dims,
-                                  *storage.value == WeightStorage::f32_dense);
+                                  *storage.value == WeightStorage::f32_dense, fp8);
         tensor.role = ref.role;
         tensor.layer = ref.layer;
         tensors.emplace_back(std::move(tensor));
@@ -102,12 +107,47 @@ template<typename T>
     return QwenDeviceWeights::from_device_tensors(std::move(tensors));
 }
 
+// FP8 engine compile + four-step in-flight graph lifecycle probe. The GGUF is
+// used only for its validated geometry/inventory; every weight is zero. This
+// avoids the expensive host quantizer and makes no model-quality claim.
+[[nodiscard]] int run_fp8_zero_graph(Device &device, Stream &stream, const Qwen35Model &model) {
+    auto weights = make_zero_trunk(device, stream, model, true);
+    QwenEngineOptions options;
+    options.kernel = QwenKernelKind::dsl;
+    options.max_context = 32u;
+    options.prefill_chunk = 8u;
+    options.dsl_decode_specialized = true;
+    options.dsl_cuda_graph = true;
+    auto engine = QwenEngine::create(device, stream, model, weights, options);
+    check(engine.ok(), "create FP8 zero engine");
+    if (!engine.ok()) { return summarize("qwen FP8 graph probe", "cuda"); }
+    const luisa::vector<uint32_t> prompt(8u, 0u);
+    luisa::vector<float> logits;
+    check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{prompt}, logits).ok(),
+          "FP8 zero prefill");
+    uint32_t token = 0u;
+    for (uint32_t step = 0; step < 4u; ++step) {
+        const auto status = (*engine.value)->decode_device_greedy(
+            stream, step == 0u ? &token : nullptr, step);
+        check(status.ok(), "FP8 zero graph decode step");
+        if (!status.ok()) { return summarize("qwen FP8 graph probe", "cuda"); }
+    }
+    luisa::vector<uint32_t> history(4u, UINT32_MAX);
+    check((*engine.value)->download_device_greedy(stream, 0u, luisa::span<uint32_t>{history}).ok(),
+          "FP8 zero graph history download");
+    check(history == luisa::vector<uint32_t>(4u, 0u), "FP8 zero graph deterministic history");
+    const auto info = (*engine.value)->info();
+    check(info.cuda_graph_steps == 4u, "FP8 graph launch counter");
+    check(info.cuda_graph_updates == 3u, "FP8 graph update counter");
+    return summarize("qwen FP8 graph probe", "cuda");
+}
+
 }// namespace
 
 int main(int argc, char **argv) {
     unbuffered_output();
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <backend>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <backend> [zero|fp8-zero]\n", argv[0]);
         return 2;
     }
     const luisa::filesystem::path model_path = "data/Qwen3.5-4B-BF16.gguf";
@@ -126,6 +166,13 @@ int main(int argc, char **argv) {
     auto model = Qwen35Model::load(**reader.value);
     check(model.ok(), "validate real trunk");
     if (!model.ok()) { return summarize("qwen mtp executor", argv[1]); }
+    if (argc > 2 && luisa::string_view{argv[2]} == "fp8-zero") {
+        if (luisa::string_view{argv[1]} != "cuda") {
+            std::fprintf(stderr, "fp8-zero graph probe requires cuda\n");
+            return 2;
+        }
+        return run_fp8_zero_graph(device, stream, *model.value);
+    }
     QwenWeightUploadOptions upload_options;
     const bool zero_mode = argc > 2 && luisa::string_view{argv[2]} == "zero";
     auto weights = zero_mode ? Result<QwenDeviceWeights>::success(make_zero_trunk(device, stream, *model.value))

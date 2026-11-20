@@ -329,6 +329,7 @@ void test_qwen35_decode_gemv(Device &dev, Stream &stream, Rng &rng, Buffer<float
                                   M, N, K, 64u, ref).ok(), "qwen35 decode gemv plain oracle");
             check_close(y, ref, 3e-3f, format == QwenWeightFormat::bf16 ? 2e-2f : 0.4f,
                         "qwen35 decode gemv plain");
+
         }
     }
 }
@@ -743,6 +744,17 @@ void test_attention(Device &dev, Stream &stream, Rng &rng) {
         check_exact(dv, rv, "attn prepare v raw");
         check_close(dkc, k_cache, 2e-5f, 2e-4f, "attn prepare k cache append");
         check_exact(dvc, v_cache, "attn prepare v cache append");
+        auto implicit = dev.compile(make_qwen_attn_prepare_kernel(true, true));
+        stream << implicit(bqp, bkp, bvp, bqnw, bknw, bpos, bq, bgate, bk, bv, bkc, bvc,
+                           T, cfg.q_heads, cfg.kv_heads, hd, cfg.rope_dim, cfg.rope_theta,
+                           cfg.norm_eps, pos0, capacity, q_rows, k_rows, v_rows)
+                      .dispatch(qwen_dispatch_threads(*plan.value));
+        check_close(download(stream, bq, rq.size()), rq, 2e-5f, 2e-4f, "attn prepare implicit-position q");
+        check_exact(download(stream, bgate, rgate.size()), rgate, "attn prepare implicit-position gate");
+        check_close(download(stream, bk, rk.size()), rk, 2e-5f, 2e-4f, "attn prepare implicit-position k");
+        check_exact(download(stream, bv, rv.size()), rv, "attn prepare implicit-position v");
+        check_close(download(stream, bkc, k_cache.size()), k_cache, 2e-5f, 2e-4f, "attn prepare implicit-position k cache");
+        check_exact(download(stream, bvc, v_cache.size()), v_cache, "attn prepare implicit-position v cache");
     }
     const uint32_t kv_len = pos0 + T;
     luisa::vector<float> rpref;
