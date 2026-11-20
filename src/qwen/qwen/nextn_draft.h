@@ -106,6 +106,9 @@ struct QwenNextnDraftInfo {
     uint64_t cache_bytes{0};
     uint64_t workspace_bytes{0};
     uint64_t compiled_shader_count{0};
+    // Same device capability record the target engine carries (qwen/caps.h), so
+    // a speculative benchmark log describes the draft executor too.
+    QwenBackendCaps caps{};
 };
 
 class QwenNextnDraft {
@@ -142,11 +145,14 @@ public:
     // reset()/propose() must use that same stream for sparse residency ordering.
     // `chunk` is the history-prefill row
     // batch (activation memory/launch tradeoff, >= 1).
+    // `kv_page_bytes` is the draft KV sparse ALLOCATION unit (0 = the
+    // allocator's 2 MiB default; see QwenEngineOptions::kv_page_bytes).
     [[nodiscard]] static Result<Ptr> create(compute::Device &device, compute::Stream &stream,
                                             const Qwen35Model &model,
                                             const QwenDeviceTensor &target_embedding,
                                             const QwenDeviceWeights &draft_weights,
-                                            uint32_t max_context, uint32_t chunk);
+                                            uint32_t max_context, uint32_t chunk,
+                                            uint64_t kv_page_bytes = 0u);
 
     ~QwenNextnDraft() noexcept;
 
@@ -194,6 +200,10 @@ private:
     uint32_t _chunk{0};
     dsl::QwenWeightFormat _format{dsl::QwenWeightFormat::bf16};
     uint32_t _warp_size{0};
+    // KV sparse allocation unit requested at create (0 = allocator default).
+    uint64_t _kv_page_bytes{0};
+    // Device capability record captured once at create (see qwen/caps.h).
+    QwenBackendCaps _caps{};
 
     // ---- borrowed weights / retained device --------------------------------
     const QwenDeviceWeights *_weights{nullptr};

@@ -18,6 +18,7 @@
 #include <luisa/runtime/stream.h>
 
 #include "qwen/benchmark.h"
+#include "qwen/caps.h"
 #include "qwen/weights.h"
 
 namespace luisa::qwen {
@@ -34,6 +35,14 @@ struct QwenEngineOptions {
     // by sparse physical tiles on demand. Must be >0 and <= the model's native
     // context length. GDN state is fixed-size and allocated separately.
     uint32_t max_context{4096};
+    // KV sparse ALLOCATION unit in bytes (0 = the allocator's 2 MiB default).
+    // One heap is allocated per page, so this trades growth granularity for
+    // allocation count: DX/VK cost one D3D12MA/VkDeviceMemory allocation per
+    // page and Vulkan's maxMemoryAllocationCount is commonly 4096, so raise this
+    // for very long contexts on Vulkan (the allocator warns with the exact value
+    // it would need). Must be a multiple of the probed sparse tile size; a
+    // non-conforming value fails closed with invalid_argument.
+    uint64_t kv_page_bytes{0};
     // Number of prompt rows per engine prefill call. DSL subdivides these rows
     // into serial 64-token WY/UT chunks; this is an activation/launch tradeoff.
     uint32_t prefill_chunk{8};
@@ -70,6 +79,11 @@ struct QwenEngineInfo {
     uint64_t cuda_graph_steps{0};
     uint64_t cuda_graph_updates{0};
     bool gdn_wy_ut{false};
+    // Device capability record captured at create (backend, warp size, sparse
+    // tile, effective KV page geometry, graph/PDL/VK extension negotiation).
+    // Carried here so a benchmark log is self-describing: "the accelerator did
+    // not help" stays distinguishable from "the accelerator never engaged".
+    QwenBackendCaps caps{};
 };
 
 class QwenEngine;

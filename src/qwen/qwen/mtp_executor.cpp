@@ -82,7 +82,8 @@ namespace {
 
     // Draft borrows the trunk embedding (tied) and the blk.<layers>.* set.
     auto draft = QwenNextnDraft::create(device, stream, model, *embd, draft_weights,
-                                        forced.max_context, forced.prefill_chunk);
+                                        forced.max_context, forced.prefill_chunk,
+                                        forced.kv_page_bytes);
     if (!draft.ok()) { return R::failure(draft.status); }
     e._draft = std::move(*draft.value);
 

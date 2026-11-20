@@ -138,6 +138,7 @@ QwenDslEngine::~QwenDslEngine() noexcept {
     e._benchmark = options.benchmark;
     e._gdn_wy_ut = options.dsl_gdn_wy_ut;
     e._decode_specialized = options.dsl_decode_specialized;
+    e._kv_page_bytes = options.kv_page_bytes;
     e._weights = &weights;
     e._device = device;
     e._stream = stream;
@@ -173,6 +174,15 @@ QwenDslEngine::~QwenDslEngine() noexcept {
     if (auto s = e.reset(stream); !s.ok()) {
         return Result<luisa::unique_ptr<QwenEngine, QwenDslEngine::Deleter>>::failure(std::move(s));
     }
+    // Capability record (opt_plan/04-backend-accelerators.md section 7). Probed
+    // once, AFTER compile_all so compute_warp_size() reports the real value, and
+    // after alloc_state so the KV page geometry can be copied out of the live
+    // allocator. Logged exactly once here: every accelerator decision downstream
+    // reads this struct instead of re-querying (or guessing from the backend
+    // name), and a benchmark log stays self-describing.
+    e._caps = qwen_probe_backend_caps(device);
+    qwen_fill_kv_page_caps(e._caps, e._kv_cache);
+    qwen_log_backend_caps(e._caps);
     return Result<luisa::unique_ptr<QwenEngine, QwenDslEngine::Deleter>>::success(std::move(engine));
 }
 
@@ -308,7 +318,8 @@ QwenDslEngine::~QwenDslEngine() noexcept {
     _gdn_states.reserve(gdn_count);
     _gdn_rings.reserve(gdn_count);
     if (auto s = _kv_cache.create(device, _stream, _max_context,
-                                  static_cast<uint32_t>(kv_n), full_count);
+                                  static_cast<uint32_t>(kv_n), full_count,
+                                  _kv_page_bytes);
         !s.ok()) {
         return s;
     }
@@ -1134,6 +1145,7 @@ QwenDslEngine::~QwenDslEngine() noexcept {
     i.cuda_graph_steps = _cuda_graph_steps;
     i.cuda_graph_updates = _cuda_graph_updates;
     i.gdn_wy_ut = _gdn_wy_ut;
+    i.caps = _caps;
     return i;
 }
 

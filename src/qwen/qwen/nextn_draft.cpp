@@ -267,7 +267,7 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
 [[nodiscard]] Result<QwenNextnDraft::Ptr> QwenNextnDraft::create(
     Device &device, Stream &stream, const Qwen35Model &model,
     const QwenDeviceTensor &target_embedding, const QwenDeviceWeights &draft_weights,
-    uint32_t max_context, uint32_t chunk) {
+    uint32_t max_context, uint32_t chunk, uint64_t kv_page_bytes) {
     using R = Result<QwenNextnDraft::Ptr>;
     if (!device) { return R::failure(invalid("invalid device")); }
     const auto &g = model.config().geometry;
@@ -300,6 +300,7 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     if (auto s = d::validate_qwen_config(e._cfg); !s.ok()) { return R::failure(std::move(s)); }
     e._max_context = max_context;
     e._chunk = chunk;
+    e._kv_page_bytes = kv_page_bytes;
     e._format = resolved.value->format;
     e._weights = &draft_weights;
     e._device = device;
@@ -336,6 +337,12 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
                                   luisa::string{std::to_string(e._warp_size)}));
     }
     if (auto s = e.reset(stream); !s.ok()) { return R::failure(std::move(s)); }
+    // Capability record (opt_plan/04-backend-accelerators.md section 7): probed
+    // once, after compile_all (warp size is only valid post-compile) and after
+    // alloc_state (draft KV page geometry), then logged exactly once.
+    e._caps = qwen_probe_backend_caps(device);
+    qwen_fill_kv_page_caps(e._caps, e._kv_cache);
+    qwen_log_backend_caps(e._caps);
     return R::success(std::move(draft));
 }
 
@@ -345,7 +352,8 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
         return invalid("draft KV element count exceeds the uint32 kernel envelope");
     }
     if (auto s = _kv_cache.create(device, _stream, _max_context,
-                                  static_cast<uint32_t>(_cfg.attn_kv_n()), 1u);
+                                  static_cast<uint32_t>(_cfg.attn_kv_n()), 1u,
+                                  _kv_page_bytes);
         !s.ok()) {
         return s;
     }
@@ -831,6 +839,7 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     i.cache_bytes = _cache_bytes;
     i.workspace_bytes = _workspace_bytes;
     i.compiled_shader_count = _shader_count;
+    i.caps = _caps;
     return i;
 }
 

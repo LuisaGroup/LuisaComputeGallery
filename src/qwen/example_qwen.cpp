@@ -114,8 +114,12 @@ struct CliArgs {
     uint32_t decode_flight{4};// greedy CUDA: forwards per bounded host sync; 0 disables
     float temperature{0.0f};
     uint64_t seed{0x51f15eED1234abcdull};
-    uint32_t max_context{0};// 0 = per-kernel-family safe default
-    uint32_t prefill_chunk{0};// 0 = per-version default
+      uint32_t max_context{0};// 0 = per-kernel-family safe default
+      uint32_t prefill_chunk{0};// 0 = per-version default
+      // KV sparse allocation unit in bytes (0 = the 2 MiB default). Raising it
+      // cuts the physical allocation count for very long contexts on Vulkan,
+      // at the cost of a coarser growth granularity.
+      uint64_t kv_page_bytes{0};
 };
 
 void print_usage() {
@@ -140,6 +144,9 @@ void print_usage() {
         "  --temperature <t> 0 = greedy argmax (default); >0 = categorical sampling\n"
         "  --seed <n>              sampling seed; reproducible by generated-token index\n"
         "  --max-context <n>       KV capacity (default 4096 dsl / 64 tile, <= 262144)\n"
+        "  --kv-page-bytes <n>     KV sparse allocation unit; 0 = 2 MiB default, must be\n"
+        "                          a multiple of the backend sparse tile (raise it for very\n"
+        "                          long contexts on Vulkan, see the caps log)\n"
         "  --prefill-chunk <n> prompt rows per engine prefill chunk (default 64 dsl / 1 tile)\n"
         "  --gdn-recurrent        DSL: use per-token recurrence instead of WY/UT chunk-64\n"
         "  --benchmark synchronize after every kernel/transfer and print raw wall timings\n"
@@ -331,6 +338,12 @@ void print_versions() {
         } else if (a == "--prefill-chunk") {
             luisa::string_view v;
             if (!next(v) || !parse_u32(v, args.prefill_chunk)) { return false; }
+        } else if (a == "--kv-page-bytes") {
+            luisa::string_view v;
+            if (!next(v) || !parse_u64(v, args.kv_page_bytes)) {
+                std::fprintf(stderr, "example_qwen: --kv-page-bytes expects an unsigned 64-bit byte count\n");
+                return false;
+            }
         } else if (!a.empty() && a[0] != '-' && !positional_backend && args.backend.empty()) {
             args.backend = luisa::string{a};// gallery convention: positional backend
             positional_backend = true;
@@ -679,6 +692,7 @@ const char *&argv0_holder() {
         options.max_context = max_context;
         options.prefill_chunk = prefill_chunk;
     options.dsl_gdn_wy_ut = !args.gdn_recurrent;
+    options.kv_page_bytes = args.kv_page_bytes;
     options.dsl_cuda_graph = args.cuda_graph;
     options.benchmark = args.benchmark || args.have_benchmark_csv;
         const auto t_compile = std::chrono::steady_clock::now();
@@ -722,6 +736,15 @@ const char *&argv0_holder() {
                         static_cast<double>(info.cache_bytes) / (1024.0 * 1024.0),
                         static_cast<double>(info.workspace_bytes) / (1024.0 * 1024.0),
                         static_cast<unsigned long long>(info.compiled_shader_count), compile_ms);
+            // KV page geometry and the one-line capability summary: a captured
+            // benchmark log then states both the allocation unit actually used
+            // and which accelerator fast paths this device could take.
+            std::printf("kv cache: page=%u B tiles/page=%u pages/region=%u heap-slots=%u "
+                        "(sparse tile %u B, sparse %s)\n",
+                        info.caps.kv_page_bytes, info.caps.kv_tiles_per_page,
+                        info.caps.kv_pages_per_region, info.caps.kv_heap_slots,
+                        info.caps.sparse_tile_bytes, info.caps.sparse_buffer ? "yes" : "no");
+            qwen_log_backend_caps(info.caps);
             std::printf("variant status: %s\n", luisa::string{spec->status}.c_str());
         }
 

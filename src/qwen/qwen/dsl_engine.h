@@ -123,11 +123,14 @@ public:
 private:
     QwenDslEngine() noexcept = default;
 
-    // ---- static geometry (frozen at construction) -------------------------
-    dsl::QwenDslConfig _cfg{};
-    uint32_t _layers{0};
-    uint32_t _max_context{0};
-    uint32_t _prefill_chunk{0};
+      // ---- static geometry (frozen at construction) -------------------------
+      dsl::QwenDslConfig _cfg{};
+      uint32_t _layers{0};
+      uint32_t _max_context{0};
+      uint32_t _prefill_chunk{0};
+      // KV sparse allocation unit requested at create (0 = allocator default).
+      // Geometry, not session state: alloc_state() freezes it into the allocator.
+      uint64_t _kv_page_bytes{0};
     dsl::QwenWeightFormat _format{dsl::QwenWeightFormat::bf16};
     WeightStorage _storage{WeightStorage::bf16_packed};
     uint32_t _warp_size{0};
@@ -325,9 +328,11 @@ private:
     compute::CudaGraphExt *_cuda_graph_ext{nullptr};// non-owning; device extension
     uint64_t _cuda_graph_steps{0};
     uint64_t _cuda_graph_updates{0};
-    uint64_t _cache_bytes{0};
-    uint64_t _workspace_bytes{0};
-    uint64_t _shader_count{0};
+      uint64_t _cache_bytes{0};
+      uint64_t _workspace_bytes{0};
+      uint64_t _shader_count{0};
+      // Device capability record captured once at create (see qwen/caps.h).
+      QwenBackendCaps _caps{};
 
     // ---- internal helpers --------------------------------------------------
     [[nodiscard]] Status compile_all(compute::Device &device);

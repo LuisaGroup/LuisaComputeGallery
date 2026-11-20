@@ -215,6 +215,13 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     if (auto s = e.reset(stream); !s.ok()) {
         return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::failure(std::move(s));
     }
+    // Capability record (opt_plan/04-backend-accelerators.md section 7): probed
+    // once, after precompile (so compute_warp_size() is meaningful) and after
+    // alloc_state (so the KV page geometry comes from the live allocator), then
+    // logged exactly once. Nothing downstream re-queries these values.
+    e._caps = qwen_probe_backend_caps(device);
+    qwen_fill_kv_page_caps(e._caps, e._kv_cache);
+    qwen_log_backend_caps(e._caps);
     return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::success(std::move(engine));
 }
 
@@ -330,7 +337,8 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     _gdn_states.reserve(gdn_count);
     _gdn_rings.reserve(2u * gdn_count);
     if (auto s = _kv_cache.create(device, _stream, _max_context,
-                                  static_cast<uint32_t>(kv_n), full_count);
+                                  static_cast<uint32_t>(kv_n), full_count,
+                                  _opt.base.kv_page_bytes);
         !s.ok()) {
         return s;
     }
@@ -1360,6 +1368,7 @@ template<typename F>
     i.cache_bytes = _cache_bytes;
     i.workspace_bytes = _workspace_bytes;
     i.compiled_shader_count = _shader_count;
+    i.caps = _caps;
     return i;
 }
 

@@ -211,6 +211,8 @@ private:
     // final logits download). Benchmark mode commits + syncs every command
     // individually, so flushes are no-ops under either policy.
     bool _stage_sync{true};
+    // Device capability record captured once at create (see qwen/caps.h).
+    QwenBackendCaps _caps{};
 
     struct LayerWeights {
         const QwenDeviceTensor *attn_norm{nullptr};

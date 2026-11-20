@@ -159,6 +159,61 @@ void test_create_invalid_handles() {
 }
 
 // ---------------------------------------------------------------------------
+// caps.cpp: backend capability record (device-free)
+// ---------------------------------------------------------------------------
+
+// A value-initialized record is the "unknown / unavailable" answer that every
+// accelerator gate in opt_plan/04 must read as false: the probe is allowed to
+// fail to determine a capability, but it may never report one it did not
+// confirm. This is the host-only half of the caps contract; the device half is
+// exercised by the engine suites and by every example_qwen run.
+void test_backend_caps_defaults() {
+    QwenBackendCaps caps{};
+    expect(caps.backend_name.empty());
+    expect(caps.warp_size == 0u);
+    expect(caps.max_shared_memory_bytes == 0u);
+    expect(caps.memory_granularity_bytes == 0u);
+    expect(!caps.sparse_buffer);
+    expect(caps.sparse_tile_bytes == 0u);
+    expect(caps.kv_page_bytes == 0u);
+    expect(caps.kv_tiles_per_page == 0u);
+    expect(caps.kv_pages_per_region == 0u);
+    expect(caps.kv_heap_slots == 0u);
+    expect(!caps.cuda_graph);
+    expect(!caps.cuda_graph_conditional_nodes);
+    expect(!caps.cuda_graph_device_launch);
+    expect(!caps.cuda_graph_programmatic_edges);
+    expect(!caps.pdl);
+    expect(!caps.async_copy_native);
+    expect(!caps.split_barrier);
+    expect(!caps.cooperative_vector);
+    expect(!caps.cooperative_matrix);
+    expect(caps.notes.empty());
+
+    // QwenEngineInfo carries the record, so a benchmark log can be read back
+    // without re-probing (and without the device still being alive).
+    QwenEngineInfo info{};
+    expect(info.caps.kv_page_bytes == 0u);
+    expect(!info.caps.sparse_buffer);
+    info.caps.backend_name = "vk";
+    info.caps.kv_page_bytes = 2u * 1024u * 1024u;
+    info.caps.kv_tiles_per_page = 32u;
+    expect(info.caps.backend_name == "vk");
+    expect(info.caps.kv_page_bytes == 2097152u);
+    expect(info.caps.kv_tiles_per_page == 32u);
+
+    // The probe itself must be callable without a device and must never throw:
+    // it reports the false/0 default and explains it in `notes`.
+    compute::Device no_device;
+    const auto probed = qwen_probe_backend_caps(no_device);
+    expect(probed.backend_name.empty());
+    expect(!probed.sparse_buffer);
+    expect(!probed.cuda_graph);
+    expect(!probed.pdl);
+    expect(probed.kv_page_bytes == 0u);
+    expect(!probed.notes.empty());
+}
+// ---------------------------------------------------------------------------
 // tokenizer.cpp: device-free self-test + real-GGUF metadata test
 // ---------------------------------------------------------------------------
 
@@ -330,6 +385,7 @@ static auto test_qwen_engine_registration = [] {
     "qwen_argmax"_test = [] { test_argmax(); };
     "qwen_temperature_sampling"_test = [] { test_temperature_sampling(); };
     "qwen_create_invalid_handles"_test = [] { test_create_invalid_handles(); };
+    "qwen_backend_caps_defaults"_test = [] { test_backend_caps_defaults(); };
     "qwen_tokenizer_self_test"_test = [] { test_tokenizer_self_test(); };
     "qwen35_pretokenizer_unicode"_test = [] { test_qwen35_pretokenizer_unicode(); };
     "qwen_real_gguf_tokenizer"_test = [] { test_real_gguf_tokenizer(); };
