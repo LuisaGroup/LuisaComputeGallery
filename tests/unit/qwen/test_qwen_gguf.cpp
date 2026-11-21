@@ -444,6 +444,143 @@ void test_real_gguf() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Q8_0 block payload -> device ABI split (phase 8a): the int8 codes must be a
+// BYTE COPY of the checkpoint's block codes and the FP16 scale an exact
+// widening. This is the zero-re-quantization contract the uploader relies on.
+// ---------------------------------------------------------------------------
+void test_q8_0_block_split() {
+    // Two hand-built blocks with distinguishable patterns.
+    // Block 0: scale fp16 0.125 (0x3000), codes i-128 for i in [0,32).
+    // Block 1: scale fp16 -0.5 (0xB800), codes 127-i.
+    luisa::vector<std::byte> payload;
+    const auto push_block = [&](uint16_t scale, int (*code)(int)) {
+        payload.emplace_back(static_cast<std::byte>(scale & 0xffu));
+        payload.emplace_back(static_cast<std::byte>(scale >> 8u));
+        for (int i = 0; i < 32; ++i) {
+            payload.emplace_back(static_cast<std::byte>(static_cast<uint8_t>(code(i))));
+        }
+    };
+    push_block(0x3000u, [](int i) { return i - 128; });
+    push_block(0xB800u, [](int i) { return 127 - i; });
+    luisa::vector<uint32_t> words(16u, 0u);
+    luisa::vector<float> scales(2u, 0.0f);
+    expect(pack_q8_0_blocks(payload, 64u, words, scales).ok());
+    expect(scales[0] == 0.125f);
+    expect(scales[1] == -0.5f);
+    // Byte copy check, both blocks, both halves of the signed range.
+    for (int b = 0; b < 2; ++b) {
+        for (int i = 0; i < 32; ++i) {
+            const uint32_t want = static_cast<uint32_t>(static_cast<uint8_t>(
+                b == 0 ? i - 128 : 127 - i));
+            const uint32_t got = (words[static_cast<size_t>(b * 8 + i / 4)] >> (8u * (i % 4))) & 0xFFu;
+            expect(got == want);
+        }
+    }
+    // The ABI dequantization reproduces int8 * scale exactly.
+    luisa::vector<float> dq(64u);
+    expect(dequantize_q8_0_matrix(words, scales, 64u, 1u, dq).ok());
+    for (int b = 0; b < 2; ++b) {
+        for (int i = 0; i < 32; ++i) {
+            const float want = (b == 0 ? 0.125f : -0.5f) * static_cast<float>(b == 0 ? i - 128 : 127 - i);
+            expect(dq[static_cast<size_t>(b * 32 + i)] == want);
+        }
+    }
+    // Invalid geometry is rejected (never partially applied).
+    expect(!pack_q8_0_blocks(luisa::span<const std::byte>{payload.data(), 34u}, 64u, words, scales).ok());
+    expect(!pack_q8_0_blocks(payload, 96u, words, scales).ok());
+    expect(!pack_q8_0_blocks(payload, 0u, words, scales).ok());
+    expect(!pack_q8_0_blocks(payload, 64u, luisa::span<uint32_t>{words.data(), 15u}, scales).ok());
+    expect(!pack_q8_0_blocks(payload, 64u, words, luisa::span<float>{scales.data(), 1u}).ok());
+    expect(!dequantize_q8_0_matrix(words, scales, 62u, 1u, dq).ok());
+}
+
+// FP16 codec used for the Q8_0 block scale: decoding is exact for every code
+// and the widening/encoding round-trip is bit exact for representable values.
+void test_fp16_codec() {
+    expect(fp16_to_f32(0x0000u) == 0.0f);
+    expect(std::signbit(fp16_to_f32(0x8000u)));
+    expect(fp16_to_f32(0x3800u) == 0.5f);
+    expect(fp16_to_f32(0x3C00u) == 1.0f);
+    expect(fp16_to_f32(0xC000u) == -2.0f);
+    expect(fp16_to_f32(0x0001u) == 0x1p-24f);// smallest subnormal
+    expect(fp16_to_f32(0x7BFFu) == 65504.0f);// largest finite
+    expect(std::isinf(fp16_to_f32(0x7C00u)));
+    expect(std::isnan(fp16_to_f32(0x7E00u)));
+    for (uint32_t code = 0; code < 0x7C00u; code++) {// finite positives
+        const float v = fp16_to_f32(static_cast<uint16_t>(code));
+        expect(f32_to_fp16(v) == static_cast<uint16_t>(code));
+    }
+    expect(f32_to_fp16(70000.0f) == 0x7C00u);// overflow -> +inf
+    expect(f32_to_fp16(-1.0e-9f) == 0x8000u);// rounds to -0
+    expect(std::isnan(fp16_to_f32(f32_to_fp16(std::nanf("")))));
+}
+
+// Real Q8_0 checkpoint (when present): walk real blocks of a real matrix and
+// prove the ABI split is a byte copy with exact scale widening -- i.e. that a
+// device upload really is the checkpoint's own int8 payload, not a
+// re-quantization of it.
+void test_real_q8_0_blocks() {
+#ifndef LUISA_QWEN_TEST_DATA_DIR
+#define LUISA_QWEN_TEST_DATA_DIR "data"
+#endif
+    const luisa::filesystem::path file{LUISA_QWEN_TEST_DATA_DIR "/Qwen3.5-4B-Q8_0.gguf"};
+    std::error_code ec;
+    if (!luisa::filesystem::exists(file, ec)) {
+        // Real checkpoint not present; the synthetic coverage above still runs.
+        return;
+    }
+    auto r = GgufReader::open(file);
+    expect(r.ok());
+    if (!r.ok()) { return; }
+    auto &reader = **r.value;
+    expect(reader.tensors().size() == 426u);
+    const auto *embd = reader.find("token_embd.weight");
+    expect(embd != nullptr);
+    if (embd == nullptr) { return; }
+    expect(embd->type == 8u);// Q8_0
+    expect(embd->dims.size() == 2u && embd->dims[0] == 2560u && embd->dims[1] == 248320u);
+    // 8 whole blocks = 272 bytes: a bounded, real read from the checkpoint.
+    constexpr uint64_t kBlocks = 8u;
+    luisa::vector<std::byte> raw(kBlocks * kQ8_0BlockBytes);
+    expect(reader.read_tensor_bytes_at(*embd, 0u, raw).ok());
+    luisa::vector<uint32_t> words(kBlocks * kQ8_0BlockSize / 4u, 0u);
+    luisa::vector<float> scales(kBlocks, 0.0f);
+    expect(pack_q8_0_blocks(raw, kBlocks * kQ8_0BlockSize, words, scales).ok());
+    // Byte copy: every int8 code of the real payload appears verbatim.
+    for (uint64_t b = 0; b < kBlocks; b++) {
+        for (uint64_t i = 0; i < kQ8_0BlockSize; i++) {
+            const uint32_t want = static_cast<uint32_t>(
+                static_cast<uint8_t>(raw[static_cast<size_t>(b * kQ8_0BlockBytes + 2u + i)]));
+            const uint32_t got =
+                (words[static_cast<size_t>(b * 8u + i / 4u)] >> (8u * (i % 4u))) & 0xFFu;
+            expect(got == want);
+        }
+        // Exact FP16 -> FP32 widening of the block scale.
+        uint16_t bits;
+        std::memcpy(&bits, raw.data() + b * kQ8_0BlockBytes, 2u);
+        expect(scales[static_cast<size_t>(b)] == fp16_to_f32(bits));
+        expect(std::isfinite(scales[static_cast<size_t>(b)]));
+        expect(scales[static_cast<size_t>(b)] >= 0.0f);// GGUF Q8_0 scales are non-negative
+    }
+    // The reader's own dequantizing path agrees with the ABI decode on the same
+    // real blocks, element for element (same int8 * scale arithmetic).
+    float ref8[kBlocks * kQ8_0BlockSize];
+    luisa::vector<float> abi(kBlocks * kQ8_0BlockSize);
+    expect(dequantize_q8_0_matrix(words, scales, kBlocks * kQ8_0BlockSize, 1u, abi).ok());
+    // read_tensor_q8_0_f32 needs the full tensor; decode the full first row of
+    // blocks by reusing the payload we already have.
+    for (uint64_t i = 0; i < kBlocks * kQ8_0BlockSize; i++) {
+        const uint8_t code = static_cast<uint8_t>(
+            raw[static_cast<size_t>((i / kQ8_0BlockSize) * kQ8_0BlockBytes + 2u + (i % kQ8_0BlockSize))]);
+        uint16_t bits;
+        std::memcpy(&bits, raw.data() + (i / kQ8_0BlockSize) * kQ8_0BlockBytes, 2u);
+        ref8[i] = fp16_to_f32(bits) * static_cast<float>(static_cast<int8_t>(code));
+        expect(abi[static_cast<size_t>(i)] == ref8[i]);
+    }
+}
+
 }// namespace
 
 static auto test_qwen_gguf_registration = [] {
@@ -452,6 +589,9 @@ static auto test_qwen_gguf_registration = [] {
     "qwen_gguf_fail_closed"_test = [] { test_fail_closed(); };
     "qwen_gguf_metadata"_test = [] { test_metadata_arrays(); };
     "qwen_gguf_real"_test = [] { test_real_gguf(); };
+    "qwen_gguf_q8_0_split"_test = [] { test_q8_0_block_split(); };
+    "qwen_gguf_fp16"_test = [] { test_fp16_codec(); };
+    "qwen_gguf_q8_0_real"_test = [] { test_real_q8_0_blocks(); };
     return 0;
 }();
 

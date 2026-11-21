@@ -1484,6 +1484,13 @@ TileCapture capture_tile_attn_decode_dynamic(const QwenTileConfig &cfg, uint32_t
         tensor_shape(1), tensor_shape(QH, HD)));
 }
 
+uint32_t tile_attention_bucket_capacity(uint32_t kv_len, uint32_t bucket_keys,
+                                        uint32_t capacity) noexcept {
+    if (bucket_keys == 0u || kv_len == 0u) { return capacity; }
+    const uint64_t ceiling = ((static_cast<uint64_t>(kv_len) + bucket_keys - 1u) / bucket_keys) * bucket_keys;
+    return ceiling < capacity ? static_cast<uint32_t>(ceiling) : capacity;
+}
+
 // ---------------------------------------------------------------------------
 // Single-query decode attention.
 // ---------------------------------------------------------------------------
@@ -1616,6 +1623,120 @@ TileCapture capture_tile_gdn_conv_silu_step(uint32_t channels, uint32_t kernel_s
     return finish_capture(definition.capture(
         tensor_shape(1, C), tensor_shape(C, KS), tensor_shape(C, R), tensor_shape(1),
         tensor_shape(C, R), tensor_shape(1, C)));
+}
+
+TileCapture capture_tile_gdn_conv_silu_chunk(uint32_t channels, uint32_t kernel_size,
+                                             uint32_t tokens) {
+    if (!extent_ok(channels) || !extent_ok(kernel_size) || kernel_size < 2 ||
+        !extent_ok(tokens) || !volume_ok(kernel_size, channels) || !volume_ok(tokens, channels)) {
+        return capture_failure(TileOpStatus::invalid_argument, "gdn conv chunk extents out of range");
+    }
+    const auto C = static_cast<int64_t>(channels);
+    const auto KS = static_cast<int64_t>(kernel_size);
+    const auto R = KS - 1;// ring slots
+    const auto T = static_cast<int64_t>(tokens);
+    if (!volume_ok(channels, static_cast<uint64_t>(R))) {
+        return capture_failure(TileOpStatus::overflow, "gdn conv chunk ring volume overflow");
+    }
+    constexpr int64_t CB = 64;
+    const auto NB = ceil_div(C, CB);
+    // Only the last min(tokens, R) rows can change a ring slot: R consecutive
+    // absolute positions visit every slot exactly once, so the newest row wins.
+    const auto NREPL = std::min<int64_t>(T, R);
+    // Per program: one contiguous [CB, R] history tile and one contiguous
+    // [CB, KS] weight tile are loaded ONCE; the convolution then keeps the
+    // (kernel_size-1)-wide causal window in SSA registers and shifts one
+    // in-register row per token. So the per-chunk global traffic is
+    // (tokens + 2) tiles instead of the per-token form's 4 tiles per token
+    // plus a whole-ring copy per token.
+    auto definition = tile_kernel("qwen_tile_gdn_conv_silu_chunk", [=](TensorView<const float, 2> src,
+                                                                       TensorView<const float, 2> weight,
+                                                                       TensorView<const float, 2> ring_in,
+                                                                       TensorView<const int32_t, 1> pos_buf,
+                                                                       TensorView<float, 2> ring_out,
+                                                                       TensorView<float, 2> out) {
+        auto one = axis("one", 1);
+        auto c = axis("c", CB);
+        auto r = axis("r", R);
+        auto ks = axis("ks", KS);
+        for (auto &block : parallel(shape(NB))) {
+            auto c0 = block.index() * CB;
+            // Absolute position of row 0 of this chunk (device-visible; one
+            // upload per chunk, not per token).
+            auto pos = cast<int64_t>(pos_buf(Scalar<int64_t>{0}).load());
+            auto history = ring_in.tile(coord(c0, 0), shape(c, r)).load();  // [c, r]
+            auto wts = weight.tile(coord(c0, 0), shape(c, ks)).load();      // [c, ks]
+            // Weight tap columns as [c] tiles (the column index is a
+            // compile-time constant, so every access is select-free).
+            luisa::vector<Tile<float>> wcol;
+            wcol.reserve(static_cast<size_t>(KS));
+            for (int64_t j = 0; j < KS; j++) {
+                wcol.push_back(map<float>(shape(c), [&](const Nest &e) {
+                    return wts.at(coord(e.index(c), j));
+                }));
+            }
+            // Initial causal window in POSITION order: window[u] is the value
+            // at absolute position pos-R+u, i.e. every entry is pre-chunk
+            // history (u < R) read from the modular ring. The slot is a
+            // runtime rotation (pos+u) % R; it is resolved by a select chain
+            // over the R compile-time slots ((decode_fp8_lane) pattern: scalar
+            // ite on lane values, no uniform-lane store select). A negative
+            // absolute position contributes 0.
+            luisa::vector<Tile<float>> window;
+            window.reserve(static_cast<size_t>(R));
+            for (int64_t u = 0; u < R; u++) {
+                auto slot = (pos + u) % R;
+                auto keep = cast<float>((pos - R + u) >= 0);
+                window.push_back(map<float>(shape(c), [&](const Nest &e) {
+                    auto cc = e.index(c);
+                    auto value = history.at(coord(cc, R - 1));
+                    for (int64_t s = R - 2; s >= 0; s--) {
+                        value = ite(slot == s, history.at(coord(cc, s)), value);
+                    }
+                    return value * keep;
+                }));
+            }
+            // One serial nest over the chunk rows: each row loads exactly its
+            // own source row, contracts the window with the tap weights, and
+            // shifts the window. `window` entries are loop-carried SSA values
+            // (the same verified pattern as the attention softmax carries).
+            for (auto &t : serial(shape(T))) {
+                auto ti = t.index();
+                auto current = reshape(src.tile(coord(ti, c0), shape(one, c)).load(), shape(c));
+                auto acc = window[0] * wcol[0];
+                for (int64_t u = 1; u < R; u++) {
+                    acc = acc + window[u] * wcol[u];
+                }
+                acc = acc + current * wcol[R];
+                out(coord(ti, c0), shape(one, c)).store(reshape(tile_silu(acc), shape(one, c)));
+                // Shift in ascending order so each slot still reads the OLD
+                // value of the next one; the newest row is the current tap.
+                for (int64_t u = 0; u + 1 < R; u++) {
+                    window[u] = window[u + 1];
+                }
+                window[R - 1] = current;
+            }
+            // Ring image: copy the history and overwrite the slots owned by the
+            // last min(tokens, R) rows. Those rows are consecutive absolute
+            // positions, so their slots are distinct: the order of the selects
+            // cannot matter.
+            auto next = history;
+            for (int64_t i = 0; i < NREPL; i++) {
+                auto row = T - NREPL + i;
+                auto slot = (pos + row) % R;
+                auto value = reshape(src.tile(coord(row, c0), shape(one, c)).load(), shape(c));
+                next = map<float>(shape(c, r), [&](const Nest &e) {
+                    auto cc = e.index(c);
+                    auto ss = e.index(r);
+                    return ite(ss == slot, value.at(coord(cc)), next.at(coord(cc, ss)));
+                });
+            }
+            ring_out(coord(c0, 0), shape(c, r)).store(next);
+        }
+    });
+    return finish_capture(definition.capture(
+        tensor_shape(T, C), tensor_shape(C, KS), tensor_shape(C, R), tensor_shape(1),
+        tensor_shape(C, R), tensor_shape(T, C)));
 }
 
 TileCapture capture_tile_gdn_gates(uint32_t tokens, uint32_t heads, float softplus_threshold) {
@@ -2583,6 +2704,35 @@ TileOpResult tile_ops_self_test(luisa::vector<luisa::string> *report) {
             ok &= close_float(dout[i], out[out.size() - dout.size() + i], 2e-5f, 2e-5f);
         }
         st.check(ok, "oracle prefill last row == decode");
+    }
+    // -- attention length-bucket policy (phase 9d) ----------------------------
+    {
+        // The static key range of the device-visible-length shaders. Every entry
+        // must cover kv_len and stay within the capacity; 0 disables bucketing.
+        const uint32_t caps[] = {64, 512, 1000, 4096};
+        const uint32_t lens[] = {1, 2, 511, 512, 513, 1023, 1024, 1025, 4095, 4096};
+        bool ok = true;
+        for (auto cap : caps) {
+            for (auto kv : lens) {
+                if (kv > cap) { continue; }
+                for (uint32_t bucket : {0u, 16u, 128u, 512u}) {
+                    const auto got = tile_attention_bucket_capacity(kv, bucket, cap);
+                    ok &= got >= kv && got <= cap;
+                    if (bucket != 0u) {
+                        ok &= (got % bucket == 0u) || got == cap;
+                        ok &= got < kv + bucket;
+                    } else {
+                        ok &= got == cap;
+                    }
+                }
+            }
+        }
+        st.check(ok, "attention bucket capacity covers kv_len within capacity");
+        st.check(tile_attention_bucket_capacity(513, 512, 4096) == 1024, "bucket capacity 513 -> 1024");
+        st.check(tile_attention_bucket_capacity(512, 512, 4096) == 512, "bucket capacity 512 -> 512");
+        st.check(tile_attention_bucket_capacity(1, 512, 4096) == 512, "bucket capacity 1 -> 512");
+        st.check(tile_attention_bucket_capacity(4000, 512, 4096) == 4096, "bucket capacity clamped at 4096");
+        st.check(tile_attention_bucket_capacity(600, 512, 1000) == 1000, "bucket capacity clamps to capacity");
     }
 
     // -- GDN conv across chunk boundary + gates + qk norm ---------------------

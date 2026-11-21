@@ -1,0 +1,41 @@
+diff --git a/src/backends/cuda/cuda_device.cpp b/src/backends/cuda/cuda_device.cpp
+index 8b4960f0d..1750f17a4 100644
+--- a/src/backends/cuda/cuda_device.cpp
++++ b/src/backends/cuda/cuda_device.cpp
+@@ -1604,16 +1604,36 @@ string CUDADevice::query(luisa::string_view property) noexcept {
+     if (property == "free_memory") {
+         return with_handle([] {
+             if (size_t free_mem, total_mem; cuMemGetInfo(&free_mem, &total_mem) == CUDA_SUCCESS) {
+                 return luisa::format("{}", free_mem);
+             }
+             return luisa::string{};
+         });
+     }
++    if (property == "multi_processor_count") {
++        // Execution-unit count of the device this DeviceInterface is bound to
++        // (CUDA: streaming multiprocessors). It is the ONE quantity that turns a
++        // kernel's block count into "blocks per SM" evidence, so it is answered
++        // from the driver attribute instead of being guessed from the device
++        // name, the tier or the compute capability. The driver query runs in this
++        // device's context (with_handle), and a failure is an EMPTY answer, not a
++        // warning: "this device cannot tell you" is a normal capability result and
++        // must not be mistaken for an error (see also the other numeric keys
++        // above, which answer an empty string the same way).
++        return with_handle([this] {
++            int count = 0;
++            if (cuDeviceGetAttribute(&count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
++                                     _handle.device()) == CUDA_SUCCESS &&
++                count > 0) {
++                return luisa::format("{}", count);
++            }
++            return luisa::string{};
++        });
++    }
+     LUISA_WARNING_WITH_LOCATION("Unknown device property '{}'.", property);
+     return {};
+ }
+ 
+ DeviceExtension *CUDADevice::extension(luisa::string_view name) noexcept {
+ 
+ #define LUISA_COMPUTE_CREATE_CUDA_EXTENSION(ext, v)                         \
+     if (name == ext##Ext::name) {                                           \

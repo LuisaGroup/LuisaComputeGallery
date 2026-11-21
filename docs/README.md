@@ -182,7 +182,7 @@ or one whose feature only exists on some backends, says so in the same cell.
 
 | Example | What it shows | Backends |
 |---|---|---|
-| [example_qwen](examples/example_qwen.md) | Text-only, single-sequence Qwen3.5-4B inference on LuisaCompute: four explicitly selectable engine variants (ordinary DSL or Tile kernels × BF16 or true FP8 E4M3 weights), an exact GGUF-loaded tokenizer, greedy or... | dsl: cuda, dx, vk; tile: dx, vk (real-model inference and device suite); Tile CUDA is unavailable in this build |
+| [example_qwen](examples/example_qwen.md) | Text-only, single-sequence Qwen3.5-4B inference on LuisaCompute: six explicitly selectable engine variants (ordinary DSL or Tile kernels × BF16, true FP8 E4M3, native Q8_0 int8-block or W4A16 group-wise weights), an... | dsl: cuda, dx, vk; tile: dx, vk (real-model inference and device suite); Tile CUDA is unavailable in this build |
 
 ## ntc
 

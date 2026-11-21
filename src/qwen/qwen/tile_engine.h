@@ -33,12 +33,18 @@
 // full-attention layer ([max_context, kv_heads*head_dim] each), one FP32 recurrent state
 // ([v_heads, head_dim, head_dim]) and TWO ping-pong conv rings
 // ([qkv_channels, kernel-1] each) per GDN layer. reset() clears logical state,
-// releases KV physical residency, and zeroes the fixed GDN buffers. The conv runs ONE TOKEN AT A TIME through
-// capture_tile_gdn_conv_silu_step with separate ring_in/ring_out buffers:
-// token at absolute position pos reads ring[pos%2] and writes ring[(pos+1)%2]
-// (a full history copy with only slot pos%(kernel-1) overwritten). This
-// trades one launch per token for the absence of any in-place ring
-// read/write hazard; exactly three capture variants (pos_mod) are compiled.
+// releases KV physical residency, and zeroes the fixed GDN buffers.
+//
+// Conv+SiLU schedule (options.chunk_conv, default true): ONE
+// capture_tile_gdn_conv_silu_chunk launch per chunk/layer for the WHOLE chunk
+// (all `rows` tokens plus the ring image), with the causal window carried in
+// registers and pos0 supplied device-visibly (one int32 upload per chunk). The
+// per-token path (capture_tile_gdn_conv_silu_step: one launch + one position
+// upload + one source-row staging copy + one output gather copy PER TOKEN) stays
+// available as the differential / A-B arm (chunk_conv=false). The ring pair is
+// ping-ponged per INVOCATION, not per position parity, so ring_in and ring_out
+// are distinct buffers for any row count (the Tile runtime rejects a buffer
+// bound to two arguments when either is writable).
 // Prefill processes the prompt in chunks of options.prefill_chunk rows using
 // the SAME recurrent GDN operator (exact per-token recurrence, NOT WY/UT);
 // K/V are appended at the proper absolute positions. decode() consumes one
@@ -48,9 +54,16 @@
 // serial key loop to one exact kv_len (and prefill pos0). To avoid a JIT per
 // token this engine uses the DEVICE-VISIBLE-LENGTH variants
 // (capture_tile_attn_prefill_dynamic / capture_tile_attn_decode_dynamic):
-// one compiled shader per (chunk_rows, capacity) streams the full capacity
+// one compiled shader per (chunk_rows, capacity) streams its STATIC key range
 // and gates keys with a limit read from a small device buffer. The scalar
-// online-softmax carry pattern is the verified-safe serial-select form.
+// online-softmax carry pattern is the verified-safe serial-select form. The
+// static range is the LENGTH BUCKET ceil(kv_len/attention_bucket_keys)*bucket
+// clamped to max_context (attention_bucket_keys=0 disables bucketing and
+// streams the whole capacity), so a 20-token session scans 512 keys instead of
+// 4096 while the length stays device-visible. The bucket list is bounded by
+// ceil(max_context/bucket)+1 shaders: precompile() compiles the decode set and
+// the full-chunk prefill set at create, and the remaining (ragged tail) pairs
+// use a bounded, logged lazy cache (max_attention_bucket_lazy).
 // A bounded, position-keyed cache for the STATIC variants is also available
 // (QwenTileEngineOptions::static_attention) for backends/routes where the
 // dynamic loop is undesirable; it fails closed on compile errors and evicts
@@ -131,6 +144,33 @@ struct QwenTileEngineOptions {
     // chunk/capacity). When false, position-specialized STATIC attention
     // shaders are compiled on demand and cached (bounded below).
     bool dynamic_attention{true};
+    // Attention length bucket in KEYS (0 disables bucketing). The
+    // device-visible-length attention shader streams a STATIC key range, so a
+    // single full-capacity specialization always costs `max_context` keys per
+    // query even for a 20-token session. With a nonzero bucket the same
+    // device-visible-length shader is compiled per length bucket and the scan
+    // is ceil(kv_len/bucket)*bucket (clamped to max_context), i.e.
+    // ceil(kv_len/512)*512 at the default: a 20-token context scans 512 keys
+    // instead of 4096. The bucket count is bounded by
+    // ceil(max_context/bucket)+1 shaders; the precompile policy in precompile()
+    // plus the bounded lazy fallback below keep a request-path compile from
+    // being a surprise (every lazy compile is logged and counted in
+    // info().tile_attention_lazy_compiles).
+    uint32_t attention_bucket_keys{512};
+    // Bound on attention bucket shaders compiled on the REQUEST path (not
+    // precompiled at create). Only ragged prefill tails and unusual
+    // (rows, bucket) pairs can need one. Exceeding the bound is a recoverable
+    // failure, never a silent fallback to the full capacity.
+    uint32_t max_attention_bucket_lazy{32};
+    // Multi-token GDN Conv4+SiLU: for a prefill chunk of MORE THAN ONE row, one
+    // capture_tile_gdn_conv_silu_chunk launch per chunk/layer (correct causal
+    // ring history + device-visible position addressing) instead of one
+    // capture_tile_gdn_conv_silu_step launch plus a per-token position upload,
+    // source-row staging copy and output gather copy. A one-row chunk (decode)
+    // always uses the step kernel: it is one launch anyway and measured ~2%
+    // faster than the generalized chunk kernel at T=1. false keeps the
+    // per-token step path for every row count as the differential / A-B arm.
+    bool chunk_conv{true};
     // Bound on the number of cached STATIC position-specialized attention
     // shaders (prefill + decode). Exceeding it is a recoverable failure.
     uint32_t max_static_attention_shaders{64};
@@ -247,6 +287,13 @@ private:
     luisa::vector<compute::Buffer<float>> _gdn_states;// [gdn_layers]
     // Two ping-pong rings per GDN layer: _gdn_rings[2*slot + parity].
     luisa::vector<compute::Buffer<float>> _gdn_rings;
+    // Which PHYSICAL ring of the pair currently holds this layer's history.
+    // The pair alternates per conv INVOCATION (not per position parity): a
+    // chunk kernel reads ring[p] and writes ring[1-p] for ANY number of rows,
+    // so ring_in and ring_out are always distinct arguments (the Tile runtime
+    // rejects one buffer bound to two arguments when either is writable).
+    // reset() zeroes both rings and clears every parity to 0.
+    luisa::vector<uint32_t> _gdn_ring_parity;
     luisa::vector<uint32_t> _full_slot;
     luisa::vector<uint32_t> _gdn_slot;
 
@@ -285,6 +332,11 @@ private:
     compute::Buffer<float> _attn_kr;       // [chunk, kv_heads, hd] roped
     compute::Buffer<float> _attn_out;      // [chunk, q_heads, hd]
     compute::Buffer<float> _gdn_conv;      // [chunk, qkv_channels]
+    // Packed QKV projection output, DENSE [chunk, qkv_channels]: the multi-token
+    // conv chunk reads its rows directly (row stride == qkv_channels), so no
+    // per-token staging copy is needed. The per-token step path stages rows out
+    // of this buffer into _conv_src (whole-buffer descriptors only).
+    compute::Buffer<float> _gdn_qkv; // [chunk * qkv_channels]
     // Per-token conv-step scratch: the one-token ping-pong conv binds these
     // as WHOLE buffers (offset 0) so every backend's storage-buffer
     // descriptor alignment rule is satisfied (Vulkan HLSL rejects unaligned
@@ -330,6 +382,13 @@ private:
     luisa::unordered_map<luisa::string, luisa::unique_ptr<compute::tile::Shader>> _shaders;
     uint64_t _shader_count{0};// distinct compiles over the lifetime
     uint32_t _static_attention_count{0};
+    // Attention bucket bookkeeping (reported through info()). _attention_caps is
+    // the canonical, bounded bucket list derived from max_context and
+    // attention_bucket_keys; the two counters separate the shaders compiled at
+    // create (no request-path surprise) from the ones compiled on first use.
+    luisa::vector<uint32_t> _attention_caps;
+    uint32_t _attention_bucket_precompiled{0};
+    uint32_t _attention_bucket_lazy{0};
 
     // ---- command benchmark (opt-in; see qwen/benchmark.h) ------------------
     bool _benchmark{false};// options.base.benchmark at construction
@@ -359,6 +418,24 @@ private:
     template<typename F>
     [[nodiscard]] Status shader_lazy(compute::Device &device, const luisa::string &key,
                                      F &&make_capture, const compute::tile::Shader **out);
+
+    // Attention capacity (static key-range of the device-visible-length
+    // shader) for a given kv_len: the bucket ceiling, clamped to max_context.
+    // kv_len <= the returned capacity always holds, which is what the captures
+    // require; it is exactly max_context when attention_bucket_keys == 0.
+    [[nodiscard]] uint32_t attention_capacity(uint32_t kv_len) const noexcept;
+    // Request-path attention shader: same cache as shader_lazy, plus the bounded
+    // lazy-compile accounting and the log line that makes a request-path compile
+    // visible instead of a silent stall. `cap`/`rows` are only for that report.
+    template<typename F>
+    [[nodiscard]] Status attention_shader(compute::Device &device, const luisa::string &key,
+                                          uint32_t rows, uint32_t cap, F &&make_capture,
+                                          const compute::tile::Shader **out);
+    // Physical ring pair for the NEXT conv invocation of `slot` (0 = first GDN
+    // layer): returns the READ buffer and sets `out` to the (always distinct)
+    // WRITE buffer, then advances the pair for the following invocation.
+    [[nodiscard]] const compute::Buffer<float> *take_ring_pair(
+        uint32_t slot, const compute::Buffer<float> *&out) noexcept;
 
     // All recording helpers take a QwenCommandBatch (plain CommandList
     // wrapper in normal mode; per-command commit+sync recorder when

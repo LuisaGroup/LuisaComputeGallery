@@ -110,8 +110,9 @@ template<typename T>
 // FP8 engine compile + four-step in-flight graph lifecycle probe. The GGUF is
 // used only for its validated geometry/inventory; every weight is zero. This
 // avoids the expensive host quantizer and makes no model-quality claim.
-[[nodiscard]] int run_fp8_zero_graph(Device &device, Stream &stream, const Qwen35Model &model) {
-    auto weights = make_zero_trunk(device, stream, model, true);
+[[nodiscard]] int run_zero_graph(Device &device, Stream &stream, const Qwen35Model &model,
+                                 bool fp8) {
+    auto weights = make_zero_trunk(device, stream, model, fp8);
     QwenEngineOptions options;
     options.kernel = QwenKernelKind::dsl;
     options.max_context = 32u;
@@ -119,27 +120,312 @@ template<typename T>
     options.dsl_decode_specialized = true;
     options.dsl_cuda_graph = true;
     auto engine = QwenEngine::create(device, stream, model, weights, options);
-    check(engine.ok(), "create FP8 zero engine");
+    check(engine.ok(), "create zero-weight graph engine");
     if (!engine.ok()) { return summarize("qwen FP8 graph probe", "cuda"); }
     const luisa::vector<uint32_t> prompt(8u, 0u);
     luisa::vector<float> logits;
     check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{prompt}, logits).ok(),
-          "FP8 zero prefill");
+          "zero-weight graph prefill");
     uint32_t token = 0u;
     for (uint32_t step = 0; step < 4u; ++step) {
         const auto status = (*engine.value)->decode_device_greedy(
             stream, step == 0u ? &token : nullptr, step);
-        check(status.ok(), "FP8 zero graph decode step");
+        check(status.ok(), "zero-weight graph decode step");
         if (!status.ok()) { return summarize("qwen FP8 graph probe", "cuda"); }
     }
     luisa::vector<uint32_t> history(4u, UINT32_MAX);
     check((*engine.value)->download_device_greedy(stream, 0u, luisa::span<uint32_t>{history}).ok(),
-          "FP8 zero graph history download");
-    check(history == luisa::vector<uint32_t>(4u, 0u), "FP8 zero graph deterministic history");
+          "zero-weight graph history download");
+    check(history == luisa::vector<uint32_t>(4u, 0u), "zero graph deterministic history");
     const auto info = (*engine.value)->info();
-    check(info.cuda_graph_steps == 4u, "FP8 graph launch counter");
-    check(info.cuda_graph_updates == 3u, "FP8 graph update counter");
-    return summarize("qwen FP8 graph probe", "cuda");
+    // Static graph (opt_plan/03 section 2.3): the decode body is captured ONCE
+    // and every later token is a bare launch, so the launch counter equals the
+    // number of steps and the update counter is exactly zero.
+    check(info.cuda_graph_steps == 4u, "graph launch counter == steps");
+    check(info.cuda_graph_updates == 0u, "graph update counter == 0");
+    check(info.position == 12u, "graph probe position accounting");
+    return summarize(fp8 ? "qwen FP8 static graph probe" : "qwen BF16 static graph probe", "cuda");
+}
+
+// ---------------------------------------------------------------------------
+// Static-graph A/B on the REAL trunk (CUDA only): graph on versus graph off must
+// generate identical greedy ids, the graph arm must report zero whole-graph
+// updates, and a reset + re-prefill must reuse the captured graph without
+// corrupting the device decode state. The 504-token prompt puts the decode
+// positions across the 512-token KV page boundary, which is the case where the
+// graph-external ensure_capacity path is exercised.
+// ---------------------------------------------------------------------------
+struct GraphArm {
+    luisa::vector<uint32_t> ids;
+    luisa::vector<uint32_t> ids_after_reset;
+    luisa::vector<uint32_t> mixed_ids;
+    uint64_t steps{0};
+    uint64_t updates{0};
+    uint32_t position{0};
+};
+
+[[nodiscard]] int run_graph_ab(Device &device, Stream &stream, const Qwen35Model &model,
+                               const QwenDeviceWeights &weights) {
+    const auto &g = model.config().geometry;
+    luisa::vector<uint32_t> prompt(504u);
+    uint64_t lcg = 12345u;
+    for (auto &id : prompt) {
+        lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+        id = static_cast<uint32_t>((lcg >> 33u) % g.vocab);
+    }
+    constexpr uint32_t steps = 64u;
+    QwenEngineOptions options;
+    options.kernel = QwenKernelKind::dsl;
+    options.max_context = 1024u;
+    options.prefill_chunk = 64u;
+    options.dsl_decode_specialized = true;
+    const auto run_arm = [&](bool graph_on) {
+        GraphArm arm;
+        options.dsl_cuda_graph = graph_on;
+        auto engine = QwenEngine::create(device, stream, model, weights, options);
+        check(engine.ok(), graph_on ? "graph A/B: create graph engine" : "graph A/B: create list engine");
+        if (!engine.ok()) { return arm; }
+        luisa::vector<float> logits;
+        check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{prompt}, logits).ok(),
+              "graph A/B: prefill");
+        auto next = qwen_argmax(logits);
+        check(next.ok(), "graph A/B: host argmax");
+        if (!next.ok()) { return arm; }
+        uint32_t pending = *next.value;
+        bool need_host = true;
+        // Bounded in-flight chunks, exactly like the CLI decode policy.
+        for (uint32_t done = 0; done < steps;) {
+            const uint32_t count = std::min(4u, steps - done);
+            for (uint32_t j = 0; j < count; j++) {
+                const auto status = (*engine.value)->decode_device_greedy(
+                    stream, need_host ? &pending : nullptr, done + j);
+                check(status.ok(), "graph A/B: device greedy step");
+                if (!status.ok()) { return arm; }
+                need_host = false;
+            }
+            luisa::vector<uint32_t> chunk(count, UINT32_MAX);
+            check((*engine.value)->download_device_greedy(stream, done, luisa::span<uint32_t>{chunk}).ok(),
+                  "graph A/B: device greedy download");
+            for (auto id : chunk) { arm.ids.emplace_back(id); }
+            done += count;
+        }
+        {
+            const auto info = (*engine.value)->info();
+            arm.steps = info.cuda_graph_steps;
+            arm.updates = info.cuda_graph_updates;
+            arm.position = info.position;
+        }
+        // Mixed host-logits -> device-greedy transition. decode() advances the
+        // position on the HOST-scalar path without touching the device decode
+        // state, so the next static-graph launch must re-upload it; a stale
+        // position would silently decode at the wrong RoPE offset and conv ring
+        // index (no crash, wrong ids). Both arms must agree.
+        {
+            uint32_t token = arm.ids.empty() ? 0u : arm.ids.back();
+            luisa::vector<float> host_logits;
+            for (uint32_t j = 0; j < 2u; j++) {
+                const auto status = (*engine.value)->decode(stream, token, host_logits);
+                check(status.ok(), "graph A/B: host-logits decode");
+                if (!status.ok()) { return arm; }
+                auto arg = qwen_argmax(host_logits);
+                check(arg.ok(), "graph A/B: host argmax after a host-logits decode");
+                if (!arg.ok()) { return arm; }
+                token = *arg.value;
+                arm.mixed_ids.emplace_back(token);
+            }
+            for (uint32_t j = 0; j < 4u; j++) {
+                const auto status = (*engine.value)->decode_device_greedy(
+                    stream, j == 0u ? &token : nullptr, j);
+                check(status.ok(), "graph A/B: device greedy step after a host-logits decode");
+                if (!status.ok()) { return arm; }
+            }
+            luisa::vector<uint32_t> chunk(4u, UINT32_MAX);
+            check((*engine.value)->download_device_greedy(stream, 0u, luisa::span<uint32_t>{chunk}).ok(),
+                  "graph A/B: download after a host-logits decode");
+            for (auto id : chunk) { arm.mixed_ids.emplace_back(id); }
+        }
+        // Reset + re-prefill: the captured graph must be reusable and the device
+        // decode state must be re-uploaded for the new session.
+        luisa::vector<uint32_t> short_prompt(prompt.begin(), prompt.begin() + 8);
+        check((*engine.value)->reset(stream).ok(), "graph A/B: reset");
+        luisa::vector<float> short_logits;
+        check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{short_prompt}, short_logits).ok(),
+              "graph A/B: re-prefill after reset");
+        auto again = qwen_argmax(short_logits);
+        check(again.ok(), "graph A/B: host argmax after reset");
+        if (!again.ok()) { return arm; }
+        uint32_t token = *again.value;
+        for (uint32_t j = 0; j < 8u; j++) {
+            const auto status = (*engine.value)->decode_device_greedy(stream, j == 0u ? &token : nullptr, j);
+            check(status.ok(), "graph A/B: device greedy step after reset");
+            if (!status.ok()) { return arm; }
+        }
+        luisa::vector<uint32_t> after(8u, UINT32_MAX);
+        check((*engine.value)->download_device_greedy(stream, 0u, luisa::span<uint32_t>{after}).ok(),
+              "graph A/B: download after reset");
+        arm.ids_after_reset = std::move(after);
+        std::printf("graph A/B arm: requested=%s steps=%llu updates=%llu position=%u ids=%s\n",
+                    graph_on ? "static" : "list",
+                    static_cast<unsigned long long>(arm.steps),
+                    static_cast<unsigned long long>(arm.updates), arm.position,
+                    arm.ids.empty() ? "-" : "ok");
+        return arm;
+    };
+    auto graphed = run_arm(true);
+    auto listed = run_arm(false);
+    check(graphed.ids.size() == steps && listed.ids.size() == steps, "graph A/B: 64 greedy ids");
+    check(!graphed.ids.empty() && graphed.ids == listed.ids,
+          "graph A/B: graph and list ids are identical (64 tokens across a KV page boundary)");
+    check(graphed.ids_after_reset == listed.ids_after_reset,
+          "graph A/B: ids after reset + re-prefill are identical");
+    check(graphed.steps == steps && graphed.updates == 0u,
+          "graph A/B: one launch per step and zero graph updates");
+    check(listed.steps == 0u && listed.updates == 0u, "graph A/B: list arm never captures a graph");
+    check(graphed.position == 504u + steps, "graph A/B: host position accounting");
+    check(!graphed.mixed_ids.empty() && graphed.mixed_ids == listed.mixed_ids,
+          "graph A/B: ids identical across the host-logits -> device-greedy transition");
+    return summarize("qwen graph A/B", "cuda");
+}
+
+// ---------------------------------------------------------------------------
+// Split-KV decode attention A/B on the REAL trunk (opt_plan/03 section 4.2).
+//
+// The two arms differ ONLY in QwenEngineOptions::dsl_split_kv. Each generates 64
+// greedy ids from a 504-token prompt, so the decode positions cross BOTH the
+// 512-token sparse-KV page boundary AND the default split threshold (512) while
+// the session runs -- the exact transition the statically guarded legacy/split/
+// combine nodes exist for. Then the session is reset, re-prefilled and 8 more ids
+// are generated, because a captured graph and the fixed partial buffers have to
+// survive a new session.
+//
+// Runs on cuda (static graph: the counters must show one launch per step and ZERO
+// updates, i.e. crossing the threshold needed no graph maintenance) and on dx/vk
+// (command lists: the same ids must come out, with steps == 0).
+// ---------------------------------------------------------------------------
+struct SplitArm {
+    luisa::vector<uint32_t> ids;
+    luisa::vector<uint32_t> ids_after_reset;
+    uint64_t steps{0};
+    uint64_t updates{0};
+    uint32_t position{0};
+    bool split{false};
+    bool dedup{false};
+    uint32_t splits{0};
+    uint32_t blocks{0};
+    uint32_t threshold{0};
+};
+
+[[nodiscard]] int run_split_ab(Device &device, Stream &stream, const Qwen35Model &model,
+                               const QwenDeviceWeights &weights, const char *backend) {
+    const auto &g = model.config().geometry;
+    const bool cuda = luisa::string_view{backend} == "cuda";
+    luisa::vector<uint32_t> prompt(504u);
+    uint64_t lcg = 987654321u;
+    for (auto &id : prompt) {
+        lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+        id = static_cast<uint32_t>((lcg >> 33u) % g.vocab);
+    }
+    constexpr uint32_t steps = 64u;
+    QwenEngineOptions options;
+    options.kernel = QwenKernelKind::dsl;
+    options.max_context = 1024u;
+    options.prefill_chunk = 64u;
+    options.dsl_decode_specialized = true;
+    const auto generate = [&](QwenEngine &engine, uint32_t first_slot, uint32_t count,
+                              uint32_t seed_token) {
+        luisa::vector<uint32_t> ids;
+        uint32_t pending = seed_token;
+        bool need_host = true;
+        for (uint32_t done = 0; done < count;) {
+            const uint32_t chunk_len = std::min(4u, count - done);
+            for (uint32_t j = 0; j < chunk_len; j++) {
+                const auto status = engine.decode_device_greedy(
+                    stream, need_host ? &pending : nullptr, first_slot + done + j);
+                check(status.ok(), "split A/B: device greedy step");
+                if (!status.ok()) { return ids; }
+                need_host = false;
+            }
+            luisa::vector<uint32_t> chunk(chunk_len, UINT32_MAX);
+            check(engine.download_device_greedy(stream, first_slot + done,
+                                                luisa::span<uint32_t>{chunk}).ok(),
+                  "split A/B: device greedy download");
+            for (auto id : chunk) { ids.emplace_back(id); }
+            done += chunk_len;
+        }
+        return ids;
+    };
+    const auto run_arm = [&](bool split_on) {
+        SplitArm arm;
+        options.dsl_split_kv = split_on;
+        auto engine = QwenEngine::create(device, stream, model, weights, options);
+        check(engine.ok(), split_on ? "split A/B: create split engine" : "split A/B: create legacy engine");
+        if (!engine.ok()) { return arm; }
+        luisa::vector<float> logits;
+        check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{prompt}, logits).ok(),
+              "split A/B: prefill 504 tokens");
+        auto next = qwen_argmax(logits);
+        check(next.ok(), "split A/B: host argmax");
+        if (!next.ok()) { return arm; }
+        arm.ids = generate(**engine.value, 0u, steps, *next.value);
+        {
+            const auto info = (*engine.value)->info();
+            arm.steps = info.cuda_graph_steps;
+            arm.updates = info.cuda_graph_updates;
+            arm.position = info.position;
+            arm.split = info.decode_attn_split;
+            arm.dedup = info.decode_attn_dedup;
+            arm.splits = info.decode_attn_splits;
+            arm.blocks = info.decode_attn_blocks;
+            arm.threshold = info.decode_attn_threshold;
+        }
+        // Reset + re-prefill: the same engine, a fresh session. The split path must
+        // produce the same ids again for the same prompt, i.e. neither the fixed
+        // partial buffers nor a captured graph may carry state across a reset.
+        check((*engine.value)->reset(stream).ok(), "split A/B: reset");
+        check((*engine.value)->prefill(stream, luisa::span<const uint32_t>{prompt}, logits).ok(),
+              "split A/B: re-prefill after reset");
+        auto again = qwen_argmax(logits);
+        check(again.ok(), "split A/B: host argmax after reset");
+        if (!again.ok()) { return arm; }
+        arm.ids_after_reset = generate(**engine.value, 0u, 8u, *again.value);
+        std::printf("split A/B arm: split=%d steps=%llu updates=%llu position=%u ids=%s\n",
+                    split_on ? 1 : 0,
+                    static_cast<unsigned long long>(arm.steps),
+                    static_cast<unsigned long long>(arm.updates), arm.position,
+                    arm.ids.empty() ? "-" : "ok");
+        return arm;
+    };
+    auto split_arm = run_arm(true);
+    auto legacy_arm = run_arm(false);
+    check(split_arm.ids.size() == steps && legacy_arm.ids.size() == steps,
+          "split A/B: 64 greedy ids per arm");
+    check(!split_arm.ids.empty() && split_arm.ids == legacy_arm.ids,
+          "split A/B: split and legacy ids are identical (64 tokens across the split threshold and a KV page)");
+    check(!split_arm.ids_after_reset.empty() &&
+              split_arm.ids_after_reset == legacy_arm.ids_after_reset,
+          "split A/B: ids after reset + re-prefill are identical");
+    check(split_arm.split && !legacy_arm.split,
+          "split A/B: the engine reports the realization it compiled");
+    check(split_arm.threshold == 512u && split_arm.position == 504u + steps,
+          "split A/B: default threshold and host position accounting");
+    // The last step ran at kv_len == position (prepare appended at position-1), which
+    // is past the threshold, so the engine must report the deduped path -- and the
+    // legacy arm must not.
+    check(split_arm.dedup && split_arm.splits > 0u &&
+              split_arm.blocks > 16u,
+          "split A/B: the split family served the final kv_len (dedup reported)");
+    check(!legacy_arm.dedup && legacy_arm.splits == 0u && legacy_arm.blocks == 16u,
+          "split A/B: the legacy arm reports the per-q_head kernel");
+    if (cuda) {
+        check(split_arm.steps == steps && split_arm.updates == 0u,
+              "split A/B: one static-graph launch per step and zero updates across the threshold");
+        check(legacy_arm.steps == steps && legacy_arm.updates == 0u,
+              "split A/B: the legacy graph also needs no updates");
+    } else {
+        check(split_arm.steps == 0u && legacy_arm.steps == 0u,
+              "split A/B: non-CUDA backends keep ordinary command lists");
+    }
+    return summarize("qwen split-KV A/B", backend);
 }
 
 }// namespace
@@ -147,7 +433,8 @@ template<typename T>
 int main(int argc, char **argv) {
     unbuffered_output();
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <backend> [zero|fp8-zero]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <backend> [zero|fp8-zero|bf16-zero|graph-ab|split-ab]\n",
+                     argv[0]);
         return 2;
     }
     const luisa::filesystem::path model_path = "data/Qwen3.5-4B-BF16.gguf";
@@ -166,12 +453,14 @@ int main(int argc, char **argv) {
     auto model = Qwen35Model::load(**reader.value);
     check(model.ok(), "validate real trunk");
     if (!model.ok()) { return summarize("qwen mtp executor", argv[1]); }
-    if (argc > 2 && luisa::string_view{argv[2]} == "fp8-zero") {
+    if (argc > 2 && (luisa::string_view{argv[2]} == "fp8-zero" ||
+                     luisa::string_view{argv[2]} == "bf16-zero")) {
         if (luisa::string_view{argv[1]} != "cuda") {
-            std::fprintf(stderr, "fp8-zero graph probe requires cuda\n");
+            std::fprintf(stderr, "the static-graph zero probe requires cuda\n");
             return 2;
         }
-        return run_fp8_zero_graph(device, stream, *model.value);
+        return run_zero_graph(device, stream, *model.value,
+                              luisa::string_view{argv[2]} == "fp8-zero");
     }
     QwenWeightUploadOptions upload_options;
     const bool zero_mode = argc > 2 && luisa::string_view{argv[2]} == "zero";
@@ -180,6 +469,18 @@ int main(int argc, char **argv) {
                                                         *model.value, upload_options);
     check(weights.ok(), zero_mode ? "create zero trunk" : "upload real trunk");
     if (!weights.ok()) { return summarize("qwen mtp executor", argv[1]); }
+    if (argc > 2 && luisa::string_view{argv[2]} == "graph-ab") {
+        if (luisa::string_view{argv[1]} != "cuda") {
+            std::fprintf(stderr, "the static-graph A/B probe requires cuda\n");
+            return 2;
+        }
+        return run_graph_ab(device, stream, *model.value, *weights.value);
+    }
+
+        if (argc > 2 && luisa::string_view{argv[2]} == "split-ab") {
+            // Split-KV decode attention A/B on the real trunk (opt_plan/03 4.2).
+            return run_split_ab(device, stream, *model.value, *weights.value, argv[1]);
+        }
     auto draft_weights = make_zero_draft(device, stream, *model.value);
     const auto *embd = weights.value->find(QwenTensorRole::token_embd);
     check(embd != nullptr, "tied embedding present");
@@ -190,7 +491,8 @@ int main(int argc, char **argv) {
     options.kernel = QwenKernelKind::dsl;
     options.max_context = 32u;
     options.prefill_chunk = 8u;
-    options.dsl_gdn_wy_ut = false;// identical plain/MTP numerical path
+    options.dsl_gdn_wy_ut = false;
+    options.dsl_gdn_auto = false;// keep the plain/MTP numerical path identical// identical plain/MTP numerical path
     options.dsl_decode_specialized = false;// verify/replay/plain reference reduction order
     auto mtp = QwenMtpExecutor::create(device, stream, *model.value, *weights.value,
                                        draft_weights, options, 2u);

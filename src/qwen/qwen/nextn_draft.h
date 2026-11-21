@@ -152,7 +152,8 @@ public:
                                             const QwenDeviceTensor &target_embedding,
                                             const QwenDeviceWeights &draft_weights,
                                             uint32_t max_context, uint32_t chunk,
-                                            uint64_t kv_page_bytes = 0u);
+      uint64_t kv_page_bytes = 0u,
+      QwenKvDType kv_dtype = QwenKvDType::f32);
 
     ~QwenNextnDraft() noexcept;
 
@@ -202,6 +203,21 @@ private:
     uint32_t _warp_size{0};
     // KV sparse allocation unit requested at create (0 = allocator default).
     uint64_t _kv_page_bytes{0};
+    // KV dtype/layout contract of the draft cache (opt_plan/05 Q3). The draft
+    // follows the target session's dtype; FP32 + position_major stays the default.
+    dsl::QwenKvStorage _kv_storage{};
+    bool _kv_packed_append{false};
+    // Packed (BF16) KV append for one draft chunk: one thread per 32-bit word,
+    // both codes in the same thread (see dsl_engine.h).
+    compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>,
+                    compute::Buffer<uint32_t>, compute::Buffer<uint32_t>, compute::Buffer<uint32_t>,
+                    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> _attn_kv_append;
+    // FP8 online-scale append of the draft cache (opt_plan/05 Q3): same kernel
+    // contract as the trunk engine (one CTA per (64-position block, kv_head)).
+    compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>,
+                    compute::Buffer<uint32_t>, compute::Buffer<uint32_t>,
+                    compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<uint32_t>,
+                    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> _attn_kv_append_fp8;
     // Device capability record captured once at create (see qwen/caps.h).
     QwenBackendCaps _caps{};
 
@@ -318,8 +334,11 @@ private:
                     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> _attn_prepare;
     compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<float>,
                     compute::Buffer<float>, compute::Buffer<float>,
-                    uint32_t, uint32_t, uint32_t, uint32_t, float, uint32_t, uint32_t> _attn_prefill;
+                    compute::Buffer<float>, compute::Buffer<float>,
+                    uint32_t, uint32_t, uint32_t, uint32_t, float, uint32_t, uint32_t,
+                    uint32_t> _attn_prefill;
     compute::Shader<1, compute::Buffer<float>, compute::Buffer<float>, compute::Buffer<float>,
+                    compute::Buffer<float>, compute::Buffer<float>,
                     compute::Buffer<float>, compute::Buffer<float>,
                     uint32_t, uint32_t, uint32_t, float, uint32_t, uint32_t> _attn_decode;
     uint64_t _shader_count{0};

@@ -267,7 +267,8 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
 [[nodiscard]] Result<QwenNextnDraft::Ptr> QwenNextnDraft::create(
     Device &device, Stream &stream, const Qwen35Model &model,
     const QwenDeviceTensor &target_embedding, const QwenDeviceWeights &draft_weights,
-    uint32_t max_context, uint32_t chunk, uint64_t kv_page_bytes) {
+    uint32_t max_context, uint32_t chunk, uint64_t kv_page_bytes,
+    QwenKvDType kv_dtype) {
     using R = Result<QwenNextnDraft::Ptr>;
     if (!device) { return R::failure(invalid("invalid device")); }
     const auto &g = model.config().geometry;
@@ -301,6 +302,8 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     e._max_context = max_context;
     e._chunk = chunk;
     e._kv_page_bytes = kv_page_bytes;
+  e._kv_storage = d::qwen_kv_storage_native(kv_dtype);
+  e._kv_packed_append = e._kv_storage.packed_words();
     e._format = resolved.value->format;
     e._weights = &draft_weights;
     e._device = device;
@@ -351,9 +354,12 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     if (kv_elems > 0xFFFFFFFFull) {
         return invalid("draft KV element count exceeds the uint32 kernel envelope");
     }
+    // The draft cache uses the SAME dtype/layout contract as the target engine
+    // (a BF16 session must not silently keep a second FP32 cache).
     if (auto s = _kv_cache.create(device, _stream, _max_context,
                                   static_cast<uint32_t>(_cfg.attn_kv_n()), 1u,
-                                  _kv_page_bytes);
+                                  _kv_page_bytes, _kv_storage.dtype,
+                                  _cfg.kv_heads, _kv_storage.layout);
         !s.ok()) {
         return s;
     }
@@ -458,9 +464,19 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     if (auto s = compile1(d::make_qwen_copy_u_kernel(), _copy_u); !s.ok()) { return s; }
     if (auto s = compile1(d::make_qwen_copy_i_kernel(), _copy_i); !s.ok()) { return s; }
     if (auto s = compile1(make_nextn_concat_half_kernel(), _concat_half); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_attn_prepare_kernel(true), _attn_prepare); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_attn_prefill_kernel(), _attn_prefill); !s.ok()) { return s; }
-    if (auto s = compile1(d::make_qwen_attn_decode_kernel(), _attn_decode); !s.ok()) { return s; }
+    // KV dtype (opt_plan/05 Q3): same contract as the target engine. A packed (BF16)
+    // cache can only be appended by the word-wise kernel below, so prepare is
+    // compiled without the inline append on that path.
+    if (auto s = compile1(d::make_qwen_attn_prepare_kernel(!_kv_packed_append, true, _kv_storage), _attn_prepare); !s.ok()) { return s; }
+    if (_kv_storage.dtype == QwenKvDType::fp8_e4m3) {
+        // fp8 keeps its per-(head,64-block) scales, so it appends through the
+        // online-scale kernel; the word-wise BF16 one would mis-address a quad.
+        if (auto s = compile1(d::make_qwen_kv_append_fp8_kernel(_kv_storage, false), _attn_kv_append_fp8); !s.ok()) { return s; }
+    } else if (_kv_packed_append) {
+        if (auto s = compile1(d::make_qwen_kv_append_packed_kernel(_kv_storage, false), _attn_kv_append); !s.ok()) { return s; }
+    }
+    if (auto s = compile1(d::make_qwen_attn_prefill_kernel(_kv_storage), _attn_prefill); !s.ok()) { return s; }
+    if (auto s = compile1(d::make_qwen_attn_decode_kernel(0u, _kv_storage), _attn_decode); !s.ok()) { return s; }
     return Status::success();
 }
 
@@ -606,6 +622,11 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
     const uint32_t qh = _cfg.q_heads, kvh = _cfg.kv_heads;
     const auto kc = _kv_cache.k_view(0u);
     const auto vc = _kv_cache.v_view(0u);
+    // fp8 draft cache: the dense per-region scale arrays of its single layer (a
+    // dummy 1-element buffer for an unscaled dtype).
+    const bool kv_fp8 = _kv_storage.dtype == QwenKvDType::fp8_e4m3;
+    const auto ksc = kv_fp8 ? _kv_cache.k_scale_view(0u) : _dummy_f.view();
+    const auto vsc = kv_fp8 ? _kv_cache.v_scale_view(0u) : _dummy_f.view();
     // Snapshot the block input as the residual stream; normed input in one pass.
     auto np = d::plan_qwen_rmsnorm_dispatch(rows, hidden);
     if (!np.ok()) { return np.status; }
@@ -632,13 +653,34 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
                                pos0, _max_context, q_rows, k_rows, v_rows)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     }
+      // Packed (BF16) KV append for this draft chunk. The prepare kernel above was
+      // compiled with append_kv = false on this path, so the cache is untouched.
+      // KV append outside the prepare kernel (opt_plan/05 Q3): both packed paths
+      // compiled the prepare with append_kv = false, so the cache is written here.
+      if (kv_fp8) {
+          const auto append_plan = d::plan_qwen_kv_append_fp8_dispatch(pos0, rows, kvh, _kv_storage);
+          if (!append_plan.ok()) { return append_plan.status; }
+          batch.annotate("nextn.attn_append");
+          batch << _attn_kv_append_fp8(_attn_k.view(), _attn_v.view(),
+                                       _kv_cache.k_word_view(0u), _kv_cache.v_word_view(0u),
+                                       ksc, vsc, _dummy_u.view(), rows, kvh, hd, pos0, _max_context)
+                        .dispatch(d::qwen_dispatch_threads(*append_plan.value));
+      } else if (_kv_packed_append) {
+              const auto append_plan = d::plan_qwen_kv_append_packed_dispatch(rows, kvh, hd, _kv_storage);
+              if (!append_plan.ok()) { return append_plan.status; }
+              batch.annotate("nextn.attn_append");
+              batch << _attn_kv_append(_attn_k.view(), _attn_v.view(),
+                                       _kv_cache.k_word_view(0u), _kv_cache.v_word_view(0u),
+                                       _dummy_u.view(), rows, kvh, hd, pos0, _max_context)
+                    .dispatch(d::qwen_dispatch_threads(*append_plan.value));
+      }
     const uint32_t kv_len = pos0 + rows;// cache now holds [0, kv_len)
     if (rows == 1u) {
         if (auto s = d::validate_qwen_attn_decode_inputs(qh, kvh, hd, kv_len, _max_context); !s.ok()) { return s; }
         auto plan = d::plan_qwen_attn_decode_dispatch(qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate("nextn.attn_decode");
-        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
+        batch << _attn_decode(_attn_q.view(), _attn_gate.view(), kc, vc, ksc, vsc, _attn_out.view(),
                               qh, kvh, hd, _cfg.attn_scale(), kv_len, _max_context)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     } else {
@@ -646,8 +688,8 @@ QwenNextnDraft::~QwenNextnDraft() noexcept {
         auto plan = d::plan_qwen_attn_prefill_dispatch(rows, qh);
         if (!plan.ok()) { return plan.status; }
         batch.annotate("nextn.attn_prefill");
-        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), kc, vc, _attn_out.view(),
-                               rows, qh, kvh, hd, _cfg.attn_scale(), pos0, kv_len)
+        batch << _attn_prefill(_attn_q.view(), _attn_gate.view(), kc, vc, ksc, vsc, _attn_out.view(),
+                               rows, qh, kvh, hd, _cfg.attn_scale(), pos0, kv_len, _max_context)
                   .dispatch(d::qwen_dispatch_threads(*plan.value));
     }
     // o_proj + residual: hidden = residual + attn_out @ W_o.

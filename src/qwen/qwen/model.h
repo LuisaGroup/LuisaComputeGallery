@@ -129,9 +129,67 @@ struct QwenTensorRef {
     const GgufTensorInfo *info{nullptr};
 };
 
-// Canonical GGUF name for a role/layer (layer ignored for global roles).
-// Returns an empty string for an invalid role/layer combination.
-[[nodiscard]] luisa::string qwen_tensor_name(QwenTensorRole role, uint64_t layer = UINT64_MAX);
+  // Canonical GGUF name for a role/layer (layer ignored for global roles).
+  // Returns an empty string for an invalid role/layer combination.
+  [[nodiscard]] luisa::string qwen_tensor_name(QwenTensorRole role, uint64_t layer = UINT64_MAX);
+
+  class Qwen35Model;
+  // ---------------------------------------------------------------------------
+  // Offline MERGED input projections (opt_plan/03 section 3 + D5, 05 section 5).
+  //
+  // The two decode-time input projection groups are concatenated OFFLINE along N
+  // into one row-per-output matrix so a decode step launches ONE GEMV per group
+  // instead of one per projection:
+  //   gdn_qkv_z_ab: attn_qkv (N = 8192) | attn_gate (4096) | ssm_alpha (32) |
+  //                 ssm_beta (32) -> N = 12352
+  //   attn_qkv:     attn_q (8192) | attn_k (1024) | attn_v (1024) -> N = 10240
+  // The concatenation is a pure ROW concatenation of the [K, N] matrices (GGUF ne
+  // order: payload row stride K), in the segment order below, so every format's
+  // per-row payload (packed words and per-row scales, if any) stays byte-identical
+  // per row and segment boundaries always fall on row boundaries. This is what
+  // makes the merge numerics-preserving: a merged row IS the source row.
+  //
+  // D5: the merged matrix is a first-class descriptor, not a bag of buffer views.
+  // `QwenTensorSegment` records, per segment, the SOURCE name, the role it keeps
+  // (so resolve_weights still binds the same consumers), the row range and the
+  // source payload identity. `qwen35_merged_projection_inventory()` is the SINGLE
+  // source of truth for the canonical order: the offline packer writes it, the
+  // manifest records it and the engine validates against it, fail closed.
+  // ---------------------------------------------------------------------------
+  enum class QwenMergeKind : uint32_t {
+      none = 0,
+      gdn_qkv_z_ab = 1,// GDN QKV | Z | alpha/a | beta/b
+      attn_qkv = 2,    // attention Q/gate | K | V
+  };
+  [[nodiscard]] luisa::string_view qwen_merge_kind_name(QwenMergeKind kind) noexcept;
+  // One segment of a merged matrix. `row_offset` is the first row of the segment
+  // in the merged matrix; rows are always contiguous and cover [0, n) exactly.
+  // `source_bytes`/`source_hash` are the identity of the source payload the segment
+  // was copied from (FNV-1a 64 of the raw stored bytes); they are 0 in an inventory
+  // description (which is computed before any payload is read) and filled in by the
+  // offline packer's manifest.
+  struct QwenTensorSegment {
+      QwenTensorRole role{QwenTensorRole::token_embd};
+      luisa::string name;
+      uint64_t rows{0};
+      uint64_t row_offset{0};
+      uint64_t source_bytes{0};
+      uint64_t source_hash{0};
+  };
+  // One merged matrix of the canonical inventory: kind, owning layer, K (input
+  // width, identical for every segment) and N (sum of the segment rows).
+  struct QwenMergedMatrixSpec {
+      QwenMergeKind kind{QwenMergeKind::none};
+      uint64_t layer{UINT64_MAX};
+      uint64_t k{0};
+      uint64_t n{0};
+      luisa::vector<QwenTensorSegment> segments;
+  };
+  // Canonical merged-projection inventory of a validated model: 32 matrices, one
+  // per decoder layer (24 GDN + 8 full attention), in layer order. Fails closed
+  // when a model's geometry does not match the frozen one.
+  [[nodiscard]] Result<luisa::vector<QwenMergedMatrixSpec>>
+  qwen35_merged_projection_inventory(const Qwen35Model &model);
 
 class Qwen35Model {
 public:

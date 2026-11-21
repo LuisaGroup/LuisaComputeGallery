@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <utility>
 
 namespace luisa::qwen {
@@ -233,9 +234,19 @@ constexpr uint64_t kMaxChunkBytes = 64ull * 1024ull * 1024ull;
     // non-const reader because FILE* positioning is internal state.
     auto &mutable_reader = const_cast<GgufReader &>(reader);
 
-    for (const auto &ref : refs) {
-        const auto &info = *ref.info;
-        auto storage = classify_weight_storage(info.name, info.type, info.dims, options.fp8);
+      for (const auto &ref : refs) {
+          const auto &info = *ref.info;
+          // OFFLINE merged input projection (opt_plan/03 section 3): a tensor that a
+          // merged matrix covers is NOT uploaded at all. The merged payload holds the
+          // same bytes (a merged row IS the source row), so the session's device
+          // footprint stays the same instead of doubling, and every consumer keeps
+          // binding its segment alias (see append_merged_projections).
+          if (options.projection_pack != nullptr &&
+              projection_pack_covers(*options.projection_pack->manifest, ref.role, ref.layer)) {
+              rep.projection_pack_skipped_tensors++;
+              continue;
+          }
+          auto storage = classify_weight_storage(info.name, info.type, info.dims, options.fp8, options.q8_0);
         if (!storage.ok()) { return Result<QwenDeviceWeights>::failure(std::move(storage.status)); }
         QwenDeviceTensor t;
         t.role = ref.role;
@@ -301,6 +312,82 @@ constexpr uint64_t kMaxChunkBytes = 64ull * 1024ull * 1024ull;
             }
             rep.bf16_count++;
             rep.device_bytes += words * 4u;
+        } else if (t.storage == WeightStorage::q8_0_packed) {
+            // NATIVE Q8_0: the GGUF int8 block codes are copied verbatim into
+            // the 4-codes-per-word ABI and each block's FP16 scale is widened
+            // exactly to FP32. ZERO host re-quantization: the device words are
+            // byte-identical to the checkpoint payload.
+            if (info.dims.size() != 2u) {
+                return Result<QwenDeviceWeights>::failure(
+                    StatusCode::internal_error,
+                    "q8_0 storage selected for a non-matrix tensor", t.name);
+            }
+            const uint64_t k = info.dims[0];
+            const uint64_t n = info.dims[1];
+            if (k == 0u || k % kQ8_0BlockSize != 0u) {
+                return Result<QwenDeviceWeights>::failure(
+                    StatusCode::unsupported,
+                    "q8_0 upload requires K % 32 == 0 (whole blocks and whole 8-word groups)",
+                    t.name);
+            }
+            const uint64_t words = info.element_count / 4u;
+            const uint64_t groups_per_row = q8_0_group_count(k);
+            uint64_t scale_count = 0;
+            if (!checked_mul(groups_per_row, n, scale_count)) {
+                return Result<QwenDeviceWeights>::failure(StatusCode::invalid_argument,
+                                                          "q8_0 scale count overflow", t.name);
+            }
+            t.packed = device.create_buffer<uint32_t>(static_cast<size_t>(words));
+            t.scales = device.create_buffer<float>(static_cast<size_t>(scale_count));
+            if (!t.packed || !t.scales) {
+                return Result<QwenDeviceWeights>::failure(StatusCode::out_of_memory,
+                                                          "device buffer allocation failed", t.name);
+            }
+            t.packed.set_name(t.name.c_str());
+            t.scales.set_name((t.name + ".scales").c_str());
+            t.groups_per_row = groups_per_row;
+            // Stream WHOLE blocks: chunk = min(blocks remaining, blocks that fit
+            // the staging budget). A block is 34 bytes, so the chunk boundary is
+            // always a block boundary and no block is ever split.
+            const uint64_t blocks = info.element_count / kQ8_0BlockSize;
+            const uint64_t blocks_per_chunk = std::max<uint64_t>(
+                1u, chunk_bytes / kQ8_0BlockBytes);
+            luisa::vector<std::byte> raw;
+            luisa::vector<uint32_t> word_staging;
+            luisa::vector<float> scale_staging;
+            uint64_t block = 0;
+            while (block < blocks) {
+                const uint64_t chunk_blocks = std::min<uint64_t>(blocks_per_chunk, blocks - block);
+                const uint64_t chunk_elems = chunk_blocks * kQ8_0BlockSize;
+                raw.resize(static_cast<size_t>(chunk_blocks * kQ8_0BlockBytes));
+                if (auto s = mutable_reader.read_tensor_bytes_at(
+                        info, block * kQ8_0BlockBytes, raw);
+                    !s.ok()) {
+                    return Result<QwenDeviceWeights>::failure(std::move(s));
+                }
+                word_staging.resize(static_cast<size_t>(chunk_elems / 4u));
+                scale_staging.resize(static_cast<size_t>(chunk_blocks));
+                if (auto s = pack_q8_0_blocks(raw, chunk_elems,
+                                              luisa::span<uint32_t>{word_staging.data(),
+                                                                    word_staging.size()},
+                                              luisa::span<float>{scale_staging.data(),
+                                                                 scale_staging.size()});
+                    !s.ok()) {
+                    return Result<QwenDeviceWeights>::failure(std::move(s));
+                }
+                const uint64_t word_off = (block * kQ8_0BlockSize) / 4u;
+                stream << t.packed.view(static_cast<size_t>(word_off),
+                                        static_cast<size_t>(word_staging.size()))
+                              .copy_from(luisa::span<const uint32_t>{word_staging.data(),
+                                                                     word_staging.size()});
+                stream << t.scales.view(static_cast<size_t>(block),
+                                        static_cast<size_t>(scale_staging.size()))
+                              .copy_from(luisa::span<const float>{scale_staging.data(),
+                                                                  scale_staging.size()});
+                block += chunk_blocks;
+            }
+            rep.q8_0_count++;
+            rep.device_bytes += words * 4u + scale_count * 4u;
         } else {
             // FP8 E4M3: quantize from the BF16/F32 source at load time.
             // Matrices only: dims [K, N].
@@ -416,19 +503,79 @@ constexpr uint64_t kMaxChunkBytes = 64ull * 1024ull * 1024ull;
                 "matrix quantized from " + luisa::string{gguf_tensor_type_name(info.type)} +
                     " to FP8 E4M3 at load time (per-row groups of 64, FP32 scales): " + t.name});
         }
-        rep.tensor_count++;
-        weights._tensors.emplace_back(std::move(t));
+          rep.tensor_count++;
+          weights._tensors.emplace_back(std::move(t));
+      }
+      // OFFLINE merged input projections: append the merged matrices and their
+      // per-segment aliases AFTER the ordinary tensors, so `find()` returns the
+      // alias for every replaced role and the merged parent stays reachable through
+      // merged_parent_of(). Nothing was appended on a failure.
+      if (options.projection_pack != nullptr) {
+          const auto &pack = *options.projection_pack;
+          if (auto s = append_merged_projections(device, stream, pack.dir, *pack.manifest,
+                                                weights._tensors, chunk_bytes, &rep);
+              !s.ok()) {
+              return Result<QwenDeviceWeights>::failure(std::move(s));
+          }
+          rep.projection_pack_format = luisa::string{weight_storage_name(pack.manifest->storage)};
+          weights._projection_pack_source = pack.manifest->source_name;
+          weights._projection_pack_format = rep.projection_pack_format;
+          rep.diagnostics.emplace_back(Diagnostic{
+              DiagnosticSeverity::info, "projection_pack",
+              luisa::format("offline merged input projections: {} matrices, {} segment aliases "
+                            "(sub-views, no duplicated bytes), {} source tensors skipped, "
+                            "format {}",
+                            rep.projection_pack_matrices, rep.projection_pack_segments,
+                            rep.projection_pack_skipped_tensors, rep.projection_pack_format)});
+      }
+      failure_sync.completed = true;
+    if (rep.q8_0_count != 0u) {
+        rep.diagnostics.emplace_back(Diagnostic{
+            DiagnosticSeverity::info, "q8_0_native",
+            luisa::format("Q8_0 matrices uploaded as the checkpoint's own int8 block codes "
+                          "(byte copy) with exact FP16->FP32 scale widening: {} matrices, "
+                          "zero re-quantization",
+                          rep.q8_0_count)});
     }
-    failure_sync.completed = true;
     return Result<QwenDeviceWeights>::success(std::move(weights));
 }
 
-[[nodiscard]] Result<QwenDeviceWeights> QwenDeviceWeights::upload(
-    compute::Device &device, compute::Stream &stream, const GgufReader &reader,
-    const Qwen35Model &model, const QwenWeightUploadOptions &options,
-    QwenWeightUploadReport *report) {
-    return upload_refs(device, stream, reader, model.tensors(), options, report);
-}
+  [[nodiscard]] Result<QwenDeviceWeights> QwenDeviceWeights::upload(
+      compute::Device &device, compute::Stream &stream, const GgufReader &reader,
+      const Qwen35Model &model, const QwenWeightUploadOptions &options,
+      QwenWeightUploadReport *report) {
+      // OFFLINE merged input projections (opt_plan/03 section 3 + D5). Every gate
+      // that can be decided from the model + manifest is decided HERE, before a
+      // single byte is uploaded: the pack must describe exactly the canonical
+      // inventory of THIS model and must have been built in the format this upload
+      // produces. A pack of the wrong format/geometry is a recoverable failure, never
+      // a silent re-interpretation.
+      if (options.projection_pack != nullptr) {
+          using R = Result<QwenDeviceWeights>;
+          const auto &pack = *options.projection_pack;
+          if (pack.manifest == nullptr) {
+                              return R::failure(StatusCode::invalid_argument,
+                                  "projection pack pointer is set but its manifest is null");
+          }
+          auto inventory = qwen35_merged_projection_inventory(model);
+          if (!inventory.ok()) { return R::failure(std::move(inventory.status)); }
+          if (auto s = validate_projection_pack_manifest(*pack.manifest, *inventory.value); !s.ok()) {
+              return R::failure(std::move(s));
+          }
+          const auto want = options.q8_0 ? WeightStorage::q8_0_packed
+                            : options.fp8 ? WeightStorage::fp8_packed
+                                          : WeightStorage::bf16_packed;
+          if (pack.manifest->storage != want) {
+              return R::failure(Status::error(
+                  StatusCode::invalid_argument,
+                  "the projection pack was built in a different weight format than this "
+                  "variant uploads (refusing to re-quantize a merged matrix)",
+                  luisa::string{weight_storage_name(pack.manifest->storage)} + " vs " +
+                      luisa::string{weight_storage_name(want)}));
+          }
+      }
+      return upload_refs(device, stream, reader, model.tensors(), options, report);
+  }
 
 [[nodiscard]] Result<QwenDeviceWeights> QwenDeviceWeights::upload_nextn(
     compute::Device &device, compute::Stream &stream, const GgufReader &reader,
@@ -464,19 +611,24 @@ constexpr uint64_t kMaxChunkBytes = 64ull * 1024ull * 1024ull;
         {"token_embd.weight", QwenTensorRole::token_embd, false},
         {"output.weight", QwenTensorRole::token_embd, false},
     };
-    luisa::vector<QwenTensorRef> refs;
-    for (const auto &spec : specs) {
-        const auto name = luisa::string{"blk.32."} + spec.suffix;
-        const auto *info = reader.find(name);
-        if (info == nullptr) {
-            if (spec.required) {
-                return R::failure(StatusCode::unsupported, "required NextN tensor disappeared after validation", name);
-            }
-            continue;
-        }
-        refs.emplace_back(QwenTensorRef{spec.role, kMtpDraftBlockIndex, info});
-    }
-    return upload_refs(device, stream, reader, luisa::span<const QwenTensorRef>{refs}, options, report);
+      luisa::vector<QwenTensorRef> refs;
+      for (const auto &spec : specs) {
+          const auto name = luisa::string{"blk.32."} + spec.suffix;
+          const auto *info = reader.find(name);
+          if (info == nullptr) {
+              if (spec.required) {
+                  return R::failure(StatusCode::unsupported, "required NextN tensor disappeared after validation", name);
+              }
+              continue;
+          }
+          refs.emplace_back(QwenTensorRef{spec.role, kMtpDraftBlockIndex, info});
+      }
+      // The draft block is never merged (the merged projection inventory covers the
+      // 32 trunk layers), so the NextN upload must NOT consume the pack: it would
+      // otherwise append a second copy of every merged matrix.
+      auto draft_options = options;
+      draft_options.projection_pack = nullptr;
+      return upload_refs(device, stream, reader, luisa::span<const QwenTensorRef>{refs}, draft_options, report);
 }
 
 [[nodiscard]] const QwenDeviceTensor *QwenDeviceWeights::find(luisa::string_view name) const noexcept {
@@ -486,12 +638,31 @@ constexpr uint64_t kMaxChunkBytes = 64ull * 1024ull * 1024ull;
     return nullptr;
 }
 
-[[nodiscard]] const QwenDeviceTensor *QwenDeviceWeights::find(QwenTensorRole role,
-                                                              uint64_t layer) const noexcept {
-    for (const auto &t : _tensors) {
-        if (t.role == role && t.layer == layer) { return &t; }
-    }
-    return nullptr;
-}
+  [[nodiscard]] const QwenDeviceTensor *QwenDeviceWeights::find(QwenTensorRole role,
+                                                                uint64_t layer) const noexcept {
+      for (const auto &t : _tensors) {
+          // A merged MATRIX is never the answer to a role lookup: its segments keep
+          // the roles and their aliases are what consumers bind. The parent is
+          // reachable through merged_parent_of()/merged_matrices().
+          if (t.merge_kind != QwenMergeKind::none) { continue; }
+          if (t.role == role && t.layer == layer) { return &t; }
+      }
+      return nullptr;
+  }
 
-}// namespace luisa::qwen
+  [[nodiscard]] const QwenDeviceTensor *QwenDeviceWeights::merged_parent_of(
+      const QwenDeviceTensor &t) const noexcept {
+      if (t.merge_parent_index >= _tensors.size()) { return nullptr; }
+      const auto &parent = _tensors[static_cast<size_t>(t.merge_parent_index)];
+      return &parent;
+  }
+
+  [[nodiscard]] luisa::vector<const QwenDeviceTensor *> QwenDeviceWeights::merged_matrices() const noexcept {
+      luisa::vector<const QwenDeviceTensor *> out;
+      for (const auto &t : _tensors) {
+          if (t.merge_kind != QwenMergeKind::none) { out.emplace_back(&t); }
+      }
+      return out;
+  }
+
+  }// namespace luisa::qwen

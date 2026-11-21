@@ -94,9 +94,8 @@ inline constexpr uint64_t kGgufMaxArrayElements = 16ull * 1024ull * 1024ull;
 inline constexpr uint32_t kGgufMaxArrayDepth = 8u;
 inline constexpr uint64_t kGgufMaxTensorCount = 1ull * 1024ull * 1024ull;
 inline constexpr uint64_t kGgufDefaultAlignment = 32u;
-// Q8_0 block geometry: 2-byte FP16 scale + 32 signed int8 codes.
-inline constexpr uint32_t kQ8_0BlockSize = 32u;
-inline constexpr uint64_t kQ8_0BlockBytes = 34u;
+// Q8_0 block geometry (2-byte FP16 scale + 32 signed int8 codes) lives in
+// qwen/common.h next to the storage ABI: kQ8_0BlockSize / kQ8_0BlockBytes.
 
 struct GgufMetaValue {
     GgufMetaType type{GgufMetaType::u8};

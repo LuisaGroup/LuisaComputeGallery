@@ -263,9 +263,23 @@ endforeach ()
 # cmake -DLUISA_QWEN_DEVICE_BACKEND=cuda ...   # dsl + tile
 set(LUISA_QWEN_DEVICE_BACKEND "" CACHE STRING
         "Backend argument for the Qwen device tests' CTest entries (empty = build only, no CTest entry)")
+# Phase 9c LCV-3 (registered separately): the split-barrier differential needs
+# VulkanDeviceConfigExt, i.e. the vendored Vulkan headers volk carries.
+gallery_test(test_qwen_split_barrier NO_CTEST
+    SOURCES "integration/qwen/test_qwen_split_barrier.cpp"
+    DEPS lc-example-qwen
+    INCLUDES "$SRC/qwen" "$SRC/ocr" "integration/qwen" "$LC/src/ext/volk/include")
+if (LUISA_QWEN_DEVICE_BACKEND)
+    add_test(NAME test_qwen_split_barrier
+             COMMAND $<TARGET_FILE:test_qwen_split_barrier> ${LUISA_QWEN_DEVICE_BACKEND})
+endif ()
 foreach (_gallery_qwen_device_test IN ITEMS
         test_qwen_kv_cache
+        test_qwen_caps
+         test_qwen_coopvec_spike
         test_qwen_ops_dsl
+        test_qwen_native_gemm
+         test_qwen_native_attention
         test_qwen_ops_tile
         test_qwen_mtp)
     gallery_test(${_gallery_qwen_device_test} NO_CTEST

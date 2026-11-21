@@ -149,6 +149,20 @@ QwenTileEngine::~QwenTileEngine() noexcept {
         options.gemm_tile_m * options.gemm_tile_n > 16384u) {
         return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::failure(invalid("gemm tile out of range"));
     }
+    // A bucket must be a sane key range; 0 means "no bucketing". Bucketing only
+    // applies to the device-visible-length (dynamic) attention shaders, and the
+    // bucket COUNT is what bounds the shader family, so that is what is
+    // validated (a bucket >= max_context degenerates to the single full
+    // capacity). 64 buckets at most: at most 64 decode + 64 full-chunk prefill
+    // specializations exist regardless of max_context.
+    if (options.attention_bucket_keys != 0u &&
+        (options.attention_bucket_keys < 16u ||
+         (static_cast<uint64_t>(options.base.max_context) + options.attention_bucket_keys - 1u) /
+                 options.attention_bucket_keys >
+             64u)) {
+        return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::failure(
+            invalid("attention_bucket_keys must be 0 (off) or a range that yields at most 64 buckets"));
+    }
 
     // Allocate with Luisa's allocator (mimalloc-backed); Deleter frees with
     // the SAME allocator (CRT new + eastl default_delete mixes heaps and
@@ -200,6 +214,18 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     // commits + syncs every command individually, so flushes are no-ops.
     e._stage_sync = backend != luisa::string_view{"dx"};
 
+  // KV dtype (opt_plan/05 Q3): the Tile engine's own attention schedule addresses the
+  // cache with the DENSE FP32 [position][kv_head][channel] arithmetic baked into every
+  // captured Tile kernel, and there is no BF16 blocked-layout Tile realization. Refuse
+  // the request EXPLICITLY instead of quietly running an FP32 cache inside a BF16
+  // session (which would be a silent dtype substitution): --kernel dsl is the path
+  // that implements BF16 KV.
+  if (options.base.kv_dtype != QwenKvDType::f32) {
+      return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::failure(
+          Status::error(StatusCode::unsupported,
+                        "the Tile engine has no BF16/blocked KV cache realization; use --kernel dsl",
+                        luisa::string{"kv_dtype "} + luisa::string{qwen_kv_dtype_name(options.base.kv_dtype)}));
+  }
     if (auto s = e.resolve_weights(model, weights); !s.ok()) {
         return Result<luisa::unique_ptr<QwenEngine, QwenTileEngine::Deleter>>::failure(std::move(s));
     }
@@ -237,7 +263,9 @@ QwenTileEngine::~QwenTileEngine() noexcept {
         _format = to::QwenTileWeightFormat::fp8_e4m3;
         _storage = WeightStorage::fp8_packed;
     } else {
-        return invalid("token_embd must be packed bf16 or fp8 (dense F32 embedding unsupported)");
+        return invalid("token_embd must be packed bf16 or fp8 (dense F32 embedding and the "
+                       "native Q8_0 storage are not implemented by the Tile variants; "
+                       "use --version dsl-q8 for a Q8_0 checkpoint)");
     }
     _token_embd = embd;
     if (auto s = check_matrix(*embd, g.hidden, g.vocab, _format); !s.ok()) { return s; }
@@ -336,9 +364,14 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     }
     _gdn_states.reserve(gdn_count);
     _gdn_rings.reserve(2u * gdn_count);
+    _gdn_ring_parity.assign(static_cast<size_t>(gdn_count), 0u);
+    // FP32 + position_major are pinned EXPLICITLY (the refusal above already
+    // rejected every other dtype): the Tile attention kernels hard-code that
+    // addressing, so the allocator must not derive a different geometry.
     if (auto s = _kv_cache.create(device, _stream, _max_context,
                                   static_cast<uint32_t>(kv_n), full_count,
-                                  _opt.base.kv_page_bytes);
+                                  _opt.base.kv_page_bytes, QwenKvDType::f32,
+                                  _cfg.kv_heads, QwenKvLayout::position_major);
         !s.ok()) {
         return s;
     }
@@ -430,6 +463,10 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     _attn_kr = mk_f(kv_elems);
     _attn_out = mk_f(q_elems);
     _gdn_conv = mk_f(gdn_conv);
+    // Dense [chunk, qkv_n] packed-QKV projection output: the multi-token conv
+    // chunk reads rows in place (stride == qkv_n), so chunk prefill needs no
+    // per-token source staging copy.
+    _gdn_qkv = mk_f(gdn_conv);
     {
         const uint64_t align_elems = _view_align_bytes / 4u;
         const uint64_t qkv_n = _cfg.gdn_qkv_n();
@@ -462,7 +499,7 @@ QwenTileEngine::~QwenTileEngine() noexcept {
     if (!_ids || !_positions || !_attn_len || !_kv_len || !_rope_cos || !_rope_sin || !_hidden || !_normed || !_residual || !_zero ||
         !_proj_a || !_proj_b || !_proj_c || !_kseg_acc || !_ffn_gate || !_ffn_up || !_ffn_act ||
         !_attn_proj_q || !_attn_proj_k || !_attn_proj_v || !_attn_q || !_attn_gate || !_attn_k ||
-        !_attn_v || !_attn_qr || !_attn_kr || !_attn_out || !_gdn_conv || !_gdn_q || !_gdn_k ||
+        !_attn_v || !_attn_qr || !_attn_kr || !_attn_out || !_gdn_conv || !_gdn_qkv || !_gdn_q || !_gdn_k ||
         !_gdn_beta || !_gdn_g || !_gdn_braw || !_gdn_out || !_gdn_normed || !_last_normed || !_logits ||
           !_conv_src || !_conv_out || !_conv_pos ||
         !_dummy_f || !_dummy_f2 || !_dummy_u) {
@@ -519,6 +556,52 @@ template<typename F>
     auto capture = make_capture();
     luisa::string detail;
     return shader_for(device, key, capture, out, detail);
+}
+
+[[nodiscard]] uint32_t QwenTileEngine::attention_capacity(uint32_t kv_len) const noexcept {
+    // ONE policy, shared with the tests (tile_ops): bucket ceiling clamped to
+    // max_context, or the whole capacity when bucketing is disabled. kv_len <=
+    // max_context is an engine invariant, so the clamp only ever applies to a
+    // partially filled last bucket and the result is never below kv_len.
+    return to::tile_attention_bucket_capacity(kv_len, _opt.attention_bucket_keys, _max_context);
+}
+
+template<typename F>
+[[nodiscard]] Status QwenTileEngine::attention_shader(Device &device, const luisa::string &key,
+                                                      uint32_t rows, uint32_t cap, F &&make_capture,
+                                                      const t::Shader **out) {
+    if (auto it = _shaders.find(key); it != _shaders.end()) {
+        *out = it->second.get();
+        return Status::success();
+    }
+    // Not precompiled at create: ragged chunk tails and (rows, bucket) pairs a
+    // prompt rule can produce that the create-time policy did not enumerate.
+    // Bounded, counted and LOGGED, because a compile on the request path is
+    // exactly the TTFT stall this engine is not allowed to hide.
+    if (_attention_bucket_lazy >= _opt.max_attention_bucket_lazy) {
+        return err(StatusCode::unsupported,
+                   "attention bucket lazy-compile bound exceeded",
+                   luisa::string{"rows "} + luisa::string{std::to_string(rows).c_str()} +
+                       ", key capacity " + luisa::string{std::to_string(cap).c_str()} +
+                       ", max_attention_bucket_lazy " +
+                       luisa::string{std::to_string(_opt.max_attention_bucket_lazy).c_str()});
+    }
+    _attention_bucket_lazy++;
+    LUISA_INFO("tile attention: compiling bucket shader on the REQUEST path "
+               "(rows={}, key capacity={}, lazy {}/{}) -- precompile() did not "
+               "enumerate this pair",
+               rows, cap, _attention_bucket_lazy, _opt.max_attention_bucket_lazy);
+    auto capture = make_capture();
+    luisa::string detail;
+    return shader_for(device, key, capture, out, detail);
+}
+
+[[nodiscard]] const Buffer<float> *QwenTileEngine::take_ring_pair(
+    uint32_t slot, const Buffer<float> *&out) noexcept {
+    const auto parity = _gdn_ring_parity[slot] & 1u;
+    _gdn_ring_parity[slot] = parity ^ 1u;
+    out = &_gdn_rings[2u * slot + (parity ^ 1u)];
+    return &_gdn_rings[2u * slot + parity];
 }
 
 [[nodiscard]] Status QwenTileEngine::precompile(Device &device, Stream &stream) {
@@ -625,18 +708,74 @@ template<typename F>
     // mid-run JIT we precompile nothing here; the cache handles it. (The
     // dynamic attention shaders below are position-independent.)
     if (_opt.dynamic_attention) {
-        for (uint32_t rows = 1; rows <= _prefill_chunk; rows++) {
-            Key kpf; kpf.add("attnpf_dyn", rows).add("cap", _max_context).add("qh", _cfg.q_heads).add("kvh", _cfg.kv_heads).add("hd", _cfg.attn_head_dim);
-            if (auto s = shader_lazy(device, kpf.s, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, rows, _max_context); }, &sh); !s.ok()) { return s; }
+        // Canonical, BOUNDED length-bucket list: 0 disables bucketing and
+        // streams the whole capacity (the historical behaviour), otherwise every
+        // multiple of the bucket below max_context plus max_context itself for a
+        // partially filled last bucket.
+        _attention_caps.clear();
+        if (_opt.attention_bucket_keys == 0u) {
+            _attention_caps.push_back(_max_context);
+        } else {
+            for (uint64_t cap = _opt.attention_bucket_keys; cap < _max_context;
+                 cap += _opt.attention_bucket_keys) {
+                _attention_caps.push_back(static_cast<uint32_t>(cap));
+            }
+            _attention_caps.push_back(_max_context);
         }
-        Key kd; kd.add("attndec_dyn", 0).add("cap", _max_context).add("qh", _cfg.q_heads).add("kvh", _cfg.kv_heads).add("hd", _cfg.attn_head_dim);
-        if (auto s = shader_lazy(device, kd.s, [&] { return to::capture_tile_attn_decode_dynamic(_cfg, _max_context); }, &sh); !s.ok()) { return s; }
+        // Precompile policy: EVERY decode bucket (the latency-critical path) and
+        // EVERY bucket at the full configured chunk size (the steady prefill
+        // path), plus every chunk size at the SMALLEST bucket (a prompt that fits
+        // in one chunk lands here). Anything else -- in practice a ragged prefill
+        // tail above the smallest bucket -- uses the bounded, logged lazy cache
+        // in attention_shader(); no path silently falls back to the full
+        // capacity.
+        const auto count_new = [&](size_t before) {
+            _attention_bucket_precompiled += static_cast<uint32_t>(_shaders.size() - before);
+        };
+        for (auto cap : _attention_caps) {
+            Key kd; kd.add("attndec_dyn", 0).add("cap", cap).add("qh", _cfg.q_heads).add("kvh", _cfg.kv_heads).add("hd", _cfg.attn_head_dim);
+            const auto before = _shaders.size();
+            if (auto s = shader_lazy(device, kd.s, [&] { return to::capture_tile_attn_decode_dynamic(_cfg, cap); }, &sh); !s.ok()) { return s; }
+            count_new(before);
+        }
+        for (auto cap : _attention_caps) {
+            Key kpf; kpf.add("attnpf_dyn", _prefill_chunk).add("cap", cap).add("qh", _cfg.q_heads).add("kvh", _cfg.kv_heads).add("hd", _cfg.attn_head_dim);
+            const auto before = _shaders.size();
+            if (auto s = shader_lazy(device, kpf.s, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, _prefill_chunk, cap); }, &sh); !s.ok()) { return s; }
+            count_new(before);
+        }
+        if (_prefill_chunk > 1u) {
+            const auto smallest = _attention_caps.front();
+            for (uint32_t rows = 1; rows < _prefill_chunk; rows++) {
+                Key kpf; kpf.add("attnpf_dyn", rows).add("cap", smallest).add("qh", _cfg.q_heads).add("kvh", _cfg.kv_heads).add("hd", _cfg.attn_head_dim);
+                const auto before = _shaders.size();
+                if (auto s = shader_lazy(device, kpf.s, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, rows, smallest); }, &sh); !s.ok()) { return s; }
+                count_new(before);
+            }
+        }
+        LUISA_INFO("tile attention: {} buckets ([{}..{}] keys), {} shaders precompiled, "
+                   "{} bounded lazy slots",
+                   _attention_caps.size(), _attention_caps.front(),
+                   _attention_caps.back(), _attention_bucket_precompiled,
+                   _opt.max_attention_bucket_lazy);
     }
     // Conv ping-pong step: exactly (kernel-1) pos_mod variants, shared by all
     // positions (the absolute pos is device-visible). No per-position JIT.
+    // Kept even when the chunk variant is selected: it is the differential and
+    // A-B path and costs nothing at run time.
     for (uint32_t pm = 0; pm + 1u < _cfg.conv_kernel; pm++) {
         Key kc; kc.add("gdnconvstep", _cfg.gdn_qkv_n()).add("ks", _cfg.conv_kernel).add("pm", pm);
         if (auto s = shader_lazy(device, kc.s, [&] { return to::capture_tile_gdn_conv_silu_step(_cfg.gdn_qkv_n(), _cfg.conv_kernel, pm); }, &sh); !s.ok()) { return s; }
+    }
+    // Multi-token conv chunk: one specialization per chunk size that can
+    // actually select it (more than one row), position device-visible (no
+    // per-position or per-token compile). With prefill_chunk == 1 the kernel can
+    // never be used, so nothing is compiled for it.
+    if (_opt.chunk_conv && _prefill_chunk > 1u) {
+        for (uint32_t rows = 2; rows <= _prefill_chunk; rows++) {
+            Key kc; kc.add("gdnconvchunk", _cfg.gdn_qkv_n()).add("ks", _cfg.conv_kernel).add("t", rows);
+            if (auto s = shader_lazy(device, kc.s, [&] { return to::capture_tile_gdn_conv_silu_chunk(_cfg.gdn_qkv_n(), _cfg.conv_kernel, rows); }, &sh); !s.ok()) { return s; }
+        }
     }
     // GDN per-chunk kernels.
     for (uint32_t rows = 1; rows <= _prefill_chunk; rows++) {
@@ -698,6 +837,9 @@ template<typename F>
         if (auto s = zero_buffer(cl, device, _gdn_states[slot], luisa::string{"reset.gdn_state.l"} + ls); !s.ok()) { return s; }
         if (auto s = zero_buffer(cl, device, _gdn_rings[2u * slot], luisa::string{"reset.gdn_ring0.l"} + ls); !s.ok()) { return s; }
         if (auto s = zero_buffer(cl, device, _gdn_rings[2u * slot + 1u], luisa::string{"reset.gdn_ring1.l"} + ls); !s.ok()) { return s; }
+        // Both rings are zero, so the pair parity restarts at 0
+        // (_gdn_rings[2*slot] is the read buffer of the next invocation).
+        _gdn_ring_parity[slot] = 0u;
     }
     cl.layer(UINT32_MAX);
     // The persistent zero operand for the residual-snapshot copy.
@@ -947,13 +1089,19 @@ template<typename F>
           << (*sh)(_attn_kr.view(), _attn_v.view(), kc, vc).dispatch();
     }
     const uint32_t kv_len = pos0 + rows;
+    // Static key range of the device-visible-length shader: the length bucket
+    // ceil(kv_len/attention_bucket_keys)*bucket clamped to max_context (the full
+    // capacity when bucketing is disabled). The length itself stays
+    // device-visible, so one shader per bucket serves every position inside it;
+    // pos0+tokens <= kv_len <= cap holds, which is the captures' requirement.
+    const uint32_t attn_cap = attention_capacity(kv_len);
     // _attn_len/_kv_len were uploaded ONCE by forward_chunk for this chunk;
     // every full-attention layer sees the same {pos0, kv_len}.
     if (rows == 1u) {
         // Decode: one query at absolute position pos0 == kv_len-1.
         if (_opt.dynamic_attention) {
-            Key key; key.add("attndec_dyn", 0).add("cap", _max_context).add("qh", qh).add("kvh", kvh).add("hd", hd);
-            if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_decode_dynamic(_cfg, _max_context); }, &sh); !s.ok()) { return s; }
+            Key key; key.add("attndec_dyn", 0).add("cap", attn_cap).add("qh", qh).add("kvh", kvh).add("hd", hd);
+            if (auto s = attention_shader(device, key.s, 0u, attn_cap, [&] { return to::capture_tile_attn_decode_dynamic(_cfg, attn_cap); }, &sh); !s.ok()) { return s; }
             cl.annotate("attn.decode_dyn")
               << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc,
                        _kv_len.view(0, _kv_len_stride), _attn_out.view()).dispatch();
@@ -970,8 +1118,8 @@ template<typename F>
         }
     } else {
         if (_opt.dynamic_attention) {
-            Key key; key.add("attnpf_dyn", rows).add("cap", _max_context).add("qh", qh).add("kvh", kvh).add("hd", hd);
-            if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, rows, _max_context); }, &sh); !s.ok()) { return s; }
+            Key key; key.add("attnpf_dyn", rows).add("cap", attn_cap).add("qh", qh).add("kvh", kvh).add("hd", hd);
+            if (auto s = attention_shader(device, key.s, rows, attn_cap, [&] { return to::capture_tile_attn_prefill_dynamic(_cfg, rows, attn_cap); }, &sh); !s.ok()) { return s; }
             cl.annotate("attn.prefill_dyn")
               << (*sh)(_attn_qr.view(), _attn_gate.view(), kc, vc,
                        _attn_len.view(), _attn_out.view()).dispatch();
@@ -1023,7 +1171,10 @@ template<typename F>
 #define QWEN_TS() do { if (_stage_sync && _opt.sync_every_layers != 0u) { cl.flush(); } } while (0)
     // Projections: packed QKV, z (gate), alpha (a), beta (b).
     QWEN_TS();
-    if (auto s = project(device, stream, cl, _normed, *lw.gdn_qkv, _proj_a, rows, nullptr, "gdn.qkv_proj"); !s.ok()) { return s; }
+    // The packed-QKV projection writes a DENSE [rows, qkv_n] buffer: the
+    // multi-token conv chunk consumes those rows in place (row stride == qkv_n),
+    // so prefill needs no per-token source staging copy.
+    if (auto s = project(device, stream, cl, _normed, *lw.gdn_qkv, _gdn_qkv, rows, nullptr, "gdn.qkv_proj"); !s.ok()) { return s; }
     QWEN_TS();
     if (auto s = project(device, stream, cl, _normed, *lw.gdn_gate, _proj_b, rows, nullptr, "gdn.z_proj"); !s.ok()) { return s; }// z
     QWEN_TS();
@@ -1033,52 +1184,79 @@ template<typename F>
     // and output in separate buffers avoids an in-place read/write alias.
     QWEN_TS();
     if (auto s = project(device, stream, cl, _normed, *lw.gdn_beta, _gdn_braw, rows, nullptr, "gdn.beta_proj"); !s.ok()) { return s; }// b (raw)
-    // Conv4 + SiLU, ONE TOKEN AT A TIME with ping-pong rings. Token at
-    // absolute position pos reads ring pair parity pos%2 and writes parity
-    // (pos+1)%2 (full history copy, only slot pos%(kernel-1) overwritten).
-    // No kernel reads and writes the same ring buffer. Exactly (kernel-1)
-    // capture variants exist (pos_mod); the absolute pos is device-visible
-    // via _positions[t]. This trades one launch per token for the absence of
-    // in-place ring read/write hazards (a correctness gate, not a perf path).
+    // Conv4 + SiLU.
+    //
+    // chunk_conv (default): ONE capture_tile_gdn_conv_silu_chunk launch for the
+    // whole chunk. It reads the packed-QKV rows in place, carries the causal
+    // window in registers, writes the SiLU rows in place and produces the ring
+    // image, with the chunk's absolute position device-visible (uploaded ONCE
+    // per chunk in forward_chunk, shared by every GDN layer). Per chunk/layer
+    // that is 1 command instead of 1 + 3*rows (position upload, source staging
+    // copy, conv launch, output gather copy, all per token).
+    //
+    // Otherwise the historical one-token path: per token a position upload, a
+    // source-row staging copy, one conv step launch and an output gather copy,
+    // alternating the ring pair (a full history copy per token).
+    //
+    // Both arms ping-pong the pair per INVOCATION, so ring_in and ring_out are
+    // never the same buffer (the Tile runtime rejects a buffer bound to two
+    // arguments when either is writable) regardless of the row count.
     {
         const uint32_t r = _cfg.conv_kernel - 1u;
-        const auto src_stride = _conv_src_stride;
         const auto pos_stride = _conv_pos_stride;
-        // Stage absolute positions into the aligned per-token pos scratch
-        // from the chunk's ABSOLUTE host span [pos0, pos0+rows) that
-        // forward_chunk staged once. No host cell is rewritten here: every
-        // chunk's span stays intact until the owning batch commits (prefill
-        // records all chunks into one batch). Padding lanes are never read
-        // (the kernel reads index 0).
-        if (static_cast<uint64_t>(pos0) + rows > _host_pos.size()) { return invalid("staging overflow: conv position rows"); }
-        cl.annotate("gdn.conv.upload_pos");
-        for (uint32_t t = 0; t < rows; t++) {
-            cl << _conv_pos.view(t * pos_stride, 1).copy_from(luisa::span<const int32_t>{_host_pos.data() + pos0 + t, 1});
-        }
-        // Stage the packed QKV rows into the aligned per-token scratch
-        // (device-to-device copies; padding lanes stay zero from reset).
-        cl.annotate("gdn.conv.stage_src");
-        for (uint32_t t = 0; t < rows; t++) {
-            cl << _proj_a.view(t * qkv_n, qkv_n).copy_to(_conv_src.view(t * src_stride, qkv_n));
-        }
-        cl.annotate("gdn.conv_silu_step");
-        for (uint32_t t = 0; t < rows; t++) {
-            const uint32_t pos = pos0 + t;
-            const uint32_t pm = pos % r;
-            const auto &ring_in = _gdn_rings[2u * slot + (pos % 2u)];
-            const auto &ring_out = _gdn_rings[2u * slot + ((pos + 1u) % 2u)];
-            Key key; key.add("gdnconvstep", qkv_n).add("ks", _cfg.conv_kernel).add("pm", pm);
-            if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_gdn_conv_silu_step(qkv_n, _cfg.conv_kernel, pm); }, &sh); !s.ok()) { return s; }
-            // Whole-buffer bindings (offset 0, aligned sizes): valid storage
-            // descriptors on every backend, including Vulkan's legacy HLSL.
-            cl << (*sh)(_conv_src.view(t * src_stride, src_stride), lw.gdn_conv1d->f32.view(),
-                        ring_in.view(), _conv_pos.view(t * pos_stride, pos_stride), ring_out.view(),
-                        _conv_out.view(t * qkv_n, qkv_n)).dispatch();
-        }
-        // Gather the per-token outputs into the packed chunk conv buffer.
-        cl.annotate("gdn.conv.gather");
-        for (uint32_t t = 0; t < rows; t++) {
-            cl << _conv_out.view(t * qkv_n, qkv_n).copy_to(_gdn_conv.view(t * qkv_n, qkv_n));
+        // A single row keeps the per-token step: it is ONE launch plus three
+        // cheap copies, and the generalized chunk kernel's initial window build
+        // costs ~2% more than the specialized tap loop at T=1 (measured, see
+        // .kimix_cache/qwen_benchmark/phase9d/REPORT.md). Prefill chunks with
+        // more than one row use the chunk kernel, where the per-token copies and
+        // launches are the whole point.
+        if (_opt.chunk_conv && rows > 1u) {
+            const Buffer<float> *ring_out = nullptr;
+            const auto *ring_in = take_ring_pair(slot, ring_out);
+            Key key; key.add("gdnconvchunk", qkv_n).add("ks", _cfg.conv_kernel).add("t", rows);
+            if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_gdn_conv_silu_chunk(qkv_n, _cfg.conv_kernel, rows); }, &sh); !s.ok()) { return s; }
+            cl.annotate("gdn.conv_silu_chunk")
+              << (*sh)(_gdn_qkv.view(), lw.gdn_conv1d->f32.view(),
+                       ring_in->view(), _conv_pos.view(0, pos_stride), ring_out->view(),
+                       _gdn_conv.view()).dispatch();
+        } else {
+            const auto src_stride = _conv_src_stride;
+            // Stage absolute positions into the aligned per-token pos scratch
+            // from the chunk's ABSOLUTE host span [pos0, pos0+rows) that
+            // forward_chunk staged once. No host cell is rewritten here: every
+            // chunk's span stays intact until the owning batch commits (prefill
+            // records all chunks into one batch). Padding lanes are never read
+            // (the kernel reads index 0).
+            if (static_cast<uint64_t>(pos0) + rows > _host_pos.size()) { return invalid("staging overflow: conv position rows"); }
+            cl.annotate("gdn.conv.upload_pos");
+            for (uint32_t t = 0; t < rows; t++) {
+                cl << _conv_pos.view(t * pos_stride, 1).copy_from(luisa::span<const int32_t>{_host_pos.data() + pos0 + t, 1});
+            }
+            // Stage the packed QKV rows into the aligned per-token scratch
+            // (device-to-device copies; padding lanes stay zero from reset).
+            cl.annotate("gdn.conv.stage_src");
+            for (uint32_t t = 0; t < rows; t++) {
+                cl << _gdn_qkv.view(t * qkv_n, qkv_n).copy_to(_conv_src.view(t * src_stride, qkv_n));
+            }
+            cl.annotate("gdn.conv_silu_step");
+            for (uint32_t t = 0; t < rows; t++) {
+                const uint32_t pos = pos0 + t;
+                const uint32_t pm = pos % r;
+                const Buffer<float> *ring_out = nullptr;
+                const auto *ring_in = take_ring_pair(slot, ring_out);
+                Key key; key.add("gdnconvstep", qkv_n).add("ks", _cfg.conv_kernel).add("pm", pm);
+                if (auto s = shader_lazy(device, key.s, [&] { return to::capture_tile_gdn_conv_silu_step(qkv_n, _cfg.conv_kernel, pm); }, &sh); !s.ok()) { return s; }
+                // Whole-buffer bindings (offset 0, aligned sizes): valid storage
+                // descriptors on every backend, including Vulkan's legacy HLSL.
+                cl << (*sh)(_conv_src.view(t * src_stride, src_stride), lw.gdn_conv1d->f32.view(),
+                            ring_in->view(), _conv_pos.view(t * pos_stride, pos_stride), ring_out->view(),
+                            _conv_out.view(t * qkv_n, qkv_n)).dispatch();
+            }
+            // Gather the per-token outputs into the packed chunk conv buffer.
+            cl.annotate("gdn.conv.gather");
+            for (uint32_t t = 0; t < rows; t++) {
+                cl << _conv_out.view(t * qkv_n, qkv_n).copy_to(_gdn_conv.view(t * qkv_n, qkv_n));
+            }
         }
     }
     QWEN_TS();
@@ -1201,6 +1379,19 @@ template<typename F>
     cl.layer(UINT32_MAX);
     if (auto s = stage_positions(cl, rows, pos0); !s.ok()) { return s; }
     if (auto s = stage_attn_len(cl, pos0, pos0 + rows); !s.ok()) { return s; }
+    if (_opt.chunk_conv && rows > 1u) {
+        // ONE device-visible chunk position per chunk, shared by every GDN
+        // layer's multi-token conv kernel (the per-token path uploads one
+        // position per token per layer). Host slot = the chunk's absolute start
+        // (never rewritten inside the batch); device slot 0, because the copies
+        // are stream-ordered ahead of the kernels that read them.
+        if (static_cast<uint64_t>(pos0) >= _host_pos.size()) {
+            return invalid("staging overflow: conv chunk position");
+        }
+        cl.annotate("gdn.conv.upload_chunk_pos")
+          << _conv_pos.view(0, _conv_pos_stride)
+                 .copy_from(luisa::span<const int32_t>{_host_pos.data() + pos0, 1});
+    }
     // Embedding gather: hidden = table[ids].
     {
         Key key; key.add("emb", static_cast<uint64_t>(_format)).add("t", rows).add("h", hidden).add("v", _cfg.vocab);
@@ -1366,8 +1557,25 @@ template<typename F>
     i.max_context = _max_context;
     i.prefill_chunk = _prefill_chunk;
     i.cache_bytes = _cache_bytes;
+  // KV storage actually built. The Tile engine is FP32 + position_major ONLY (it
+  // refuses every other dtype in create()), so these are constants of this engine
+  // rather than a request echo -- reported so a log can compare tiers/engines.
+  i.kv_dtype = QwenKvDType::f32;
+  i.kv_layout = QwenKvLayout::position_major;
+  i.kv_elements_per_word = _kv_cache.elements_per_word();
+  i.kv_region_words = _kv_cache.region_words();
+  i.kv_payload_bytes = _kv_cache.payload_bytes();
+  i.kv_page_bytes = _kv_cache.page_size_bytes();
+  i.kv_pages_per_region = _kv_cache.pages_per_region();
+  i.kv_heap_slots = _kv_cache.heap_slot_count();
+  i.kv_min_commit_pages = _kv_cache.min_commit_pages();
     i.workspace_bytes = _workspace_bytes;
     i.compiled_shader_count = _shader_count;
+    i.tile_chunk_conv = _opt.chunk_conv;
+    i.tile_attention_bucket_keys = _opt.dynamic_attention ? _opt.attention_bucket_keys : 0u;
+    i.tile_attention_buckets = static_cast<uint32_t>(_attention_caps.size());
+    i.tile_attention_precompiled = _attention_bucket_precompiled;
+    i.tile_attention_lazy_compiles = _attention_bucket_lazy;
     i.caps = _caps;
     return i;
 }

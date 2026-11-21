@@ -30,6 +30,22 @@ void QwenEngineDeleter::operator()(QwenEngine *p) const noexcept {
     return "unknown";
 }
 
+[[nodiscard]] luisa::string QwenChunkResult::summary() const noexcept {
+    return luisa::format(
+        "requested={} executed={} eos={} context-limit={} path={}",
+        requested, executed, eos ? 1 : 0, context_limit ? 1 : 0,
+        fallback ? "per-token-fallback" : "while-graph");
+}
+
+[[nodiscard]] luisa::string QwenPdlStatus::summary() const noexcept {
+    return luisa::format(
+        "requested={} extension={} supported={} auto-prologue={} stream-enabled={} "
+        "relaxed={} strict={} driver-fallbacks={} reason='{}'",
+        requested ? 1 : 0, available ? 1 : 0, supported ? 1 : 0,
+        auto_prologue ? 1 : 0, stream_enabled ? 1 : 0,
+        relaxed_launches, strict_launches, driver_fallbacks, reason);
+}
+
 [[nodiscard]] Result<QwenEnginePtr> QwenEngine::create(
     compute::Device &device, compute::Stream &stream,
     const Qwen35Model &model, const QwenDeviceWeights &weights,

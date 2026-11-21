@@ -65,10 +65,25 @@ namespace {
     // next_logits came from the WY verify row. Keep MTP on the exact recurrent
     // path until per-row chunk-state restore is implemented.
     forced.dsl_gdn_wy_ut = false;
+    forced.dsl_gdn_auto = false;// keep the per-prompt rule from re-selecting WY/UT
     // Single-row decode specializations use different reduction orders from
     // multi-row verify. Keep target/replay/plain-reference numerics aligned.
     forced.dsl_decode_specialized = false;
+    // MTP verify feeds the same attention kernel several accepted-prefix
+    // reconstructions; keep them on the reference prefill attention so a verify
+    // row and its replay differ only by the GDN path, not by softmax
+    // reassociation. The ordinary (non-MTP) engine keeps the tiled kernel.
+    forced.dsl_tiled_prefill_attn = false;
+ // The same reason applies to the CUDA tensor-core prefill attention (opt_plan/09
+ // N1b): it is a different numerical realization (BF16 operands and P weights) of
+ // the same math, so verify and replay must not disagree by softmax precision.
+ forced.native_tensor_attention = false;
     forced.dsl_cuda_graph = false;
+    // The executor splits the prompt with the fixed chunk above and copies each
+    // chunk's hidden rows into its own history buffer, so it keeps the exact
+    // fixed-chunk schedule instead of the adaptive rule (which is a plain
+    // single-sequence prefill feature).
+    forced.prefill_chunk_adaptive = false;
     auto target = QwenDslEngine::create(device, stream, model, trunk_weights, forced);
     if (!target.ok()) { return R::failure(target.status); }
 
@@ -83,7 +98,7 @@ namespace {
     // Draft borrows the trunk embedding (tied) and the blk.<layers>.* set.
     auto draft = QwenNextnDraft::create(device, stream, model, *embd, draft_weights,
                                         forced.max_context, forced.prefill_chunk,
-                                        forced.kv_page_bytes);
+      forced.kv_page_bytes, forced.kv_dtype);
     if (!draft.ok()) { return R::failure(draft.status); }
     e._draft = std::move(*draft.value);
 

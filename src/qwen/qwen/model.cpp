@@ -501,8 +501,91 @@ namespace {
     return n;
 }
 
-[[nodiscard]] uint64_t Qwen35Model::gdn_layers() const noexcept {
-    return _config.geometry.layers - full_attention_layers();
-}
+  [[nodiscard]] uint64_t Qwen35Model::gdn_layers() const noexcept {
+      return _config.geometry.layers - full_attention_layers();
+  }
 
-}// namespace luisa::qwen
+  // ---------------------------------------------------------------------------
+  // Merged input-projection inventory (opt_plan/03 section 3 + D5).
+  // ---------------------------------------------------------------------------
+  [[nodiscard]] luisa::string_view qwen_merge_kind_name(QwenMergeKind kind) noexcept {
+      switch (kind) {
+          case QwenMergeKind::none: return "none";
+          case QwenMergeKind::gdn_qkv_z_ab: return "gdn_qkv_z_ab";
+          case QwenMergeKind::attn_qkv: return "attn_qkv";
+      }
+      return "unknown";
+  }
+
+  [[nodiscard]] Result<luisa::vector<QwenMergedMatrixSpec>>
+  qwen35_merged_projection_inventory(const Qwen35Model &model) {
+      const auto &g = model.config().geometry;
+      if (g.layers == 0u || g.hidden == 0u) {
+          return Result<luisa::vector<QwenMergedMatrixSpec>>::failure(
+              Status::error(StatusCode::invalid_argument,
+                            "merged projection inventory needs a non-empty model geometry"));
+      }
+      luisa::vector<QwenMergedMatrixSpec> inventory;
+      inventory.reserve(static_cast<size_t>(g.layers));
+      for (uint64_t l = 0; l < g.layers; ++l) {
+          QwenMergedMatrixSpec spec;
+          spec.layer = l;
+          spec.k = g.hidden;
+          using R = QwenTensorRole;
+          struct RoleRows {
+              R role;
+              uint64_t rows;
+          };
+          // Segment order is part of the ABI: the decode GEMV routes output rows to
+          // destinations by exactly this order, and the offline packer writes the
+          // rows in it. Changing it is a pack version change, never a free edit.
+          luisa::vector<RoleRows> want;
+          if (is_full_attention_layer(g, l)) {
+              spec.kind = QwenMergeKind::attn_qkv;
+              want = {{R::attn_q, g.q_proj_n},
+                      {R::attn_k, g.kv_proj_n},
+                      {R::attn_v, g.kv_proj_n}};
+          } else {
+              spec.kind = QwenMergeKind::gdn_qkv_z_ab;
+              want = {{R::gdn_qkv, g.gdn_qkv_n},
+                      {R::gdn_gate, g.gdn_z_n},
+                      {R::gdn_alpha, g.gdn_gate_n},
+                      {R::gdn_beta, g.gdn_gate_n}};
+          }
+          uint64_t rows = 0;
+          for (const auto &w : want) {
+              const auto *ref = model.find(w.role, l);
+              if (ref == nullptr || ref->info == nullptr) {
+                  return Result<luisa::vector<QwenMergedMatrixSpec>>::failure(Status::error(
+                      StatusCode::not_found,
+                      "merged projection segment source tensor is missing",
+                      luisa::string{qwen_tensor_name(w.role, l)}));
+              }
+              // The source matrix must be exactly [K = hidden, rows]: the merge is a
+              // row concatenation, so any other shape would silently re-segment.
+              if (ref->info->dims.size() != 2u || ref->info->dims[0] != spec.k || ref->info->dims[1] != w.rows) {
+                  return Result<luisa::vector<QwenMergedMatrixSpec>>::failure(Status::error(
+                      StatusCode::invalid_argument,
+                      "merged projection segment source shape does not match the frozen geometry",
+                      luisa::string{qwen_tensor_name(w.role, l)}));
+              }
+              QwenTensorSegment seg;
+              seg.role = w.role;
+              seg.name = ref->info->name;
+              seg.rows = w.rows;
+              seg.row_offset = rows;
+              spec.segments.emplace_back(std::move(seg));
+              rows += w.rows;
+          }
+          spec.n = rows;
+          if (spec.n == 0u || spec.n > 0xFFFFFFFFull || spec.k > 0xFFFFFFFFull) {
+              return Result<luisa::vector<QwenMergedMatrixSpec>>::failure(Status::error(
+                  StatusCode::invalid_argument,
+                  "merged projection shape exceeds the uint32 kernel envelope"));
+          }
+          inventory.emplace_back(std::move(spec));
+      }
+      return Result<luisa::vector<QwenMergedMatrixSpec>>::success(std::move(inventory));
+  }
+
+  }// namespace luisa::qwen

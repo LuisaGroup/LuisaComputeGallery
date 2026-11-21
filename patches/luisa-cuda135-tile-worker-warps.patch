@@ -1,0 +1,55 @@
+diff --git a/src/backends/cuda/tile/cuda_tile.cpp b/src/backends/cuda/tile/cuda_tile.cpp
+--- a/src/backends/cuda/tile/cuda_tile.cpp
++++ b/src/backends/cuda/tile/cuda_tile.cpp
+@@ -747,15 +747,24 @@
+     }
+     auto aligned16_option = luisa::get_environment_variable("LUISA_CUDA_TILE_IR_ALIGNED16");
+     auto aligned16_requested = aligned16_option && luisa::string_view{*aligned16_option} == "1";
+-    auto worker_warps = 0u;
+-    if (auto workers = luisa::get_environment_variable("LUISA_CUDA_TILE_WORKER_WARPS")) {
+-        auto value = luisa::string_view{*workers};
+-        if (value == "4" || value == "8") {
+-            worker_warps = static_cast<uint32_t>(value.front() - '0');
+-        } else if (value != "0") {
+-            return fail("LUISA_CUDA_TILE_WORKER_WARPS requires 0, 4 or 8");
+-        }
+-    }
++    auto worker_warps = 0u;
++    if (auto workers = luisa::get_environment_variable("LUISA_CUDA_TILE_WORKER_WARPS")) {
++        auto value = luisa::string_view{*workers};
++        // CUDA 13.5 widened num_worker_warps_per_cta from {4, 8} to every
++        // power of two in [1, 32]. The original values keep their exact
++        // meaning; 1/2/16/32 are accepted here and then fail closed inside
++        // NVRTC/tileiras on an older toolkit (13.4 knows only 4 and 8), so a
++        // hint this toolkit cannot honour is never silently dropped.
++        if (value == "1" || value == "2" || value == "4" || value == "8") {
++            worker_warps = static_cast<uint32_t>(value.front() - '0');
++        } else if (value == "16") {
++            worker_warps = 16u;
++        } else if (value == "32") {
++            worker_warps = 32u;
++        } else if (value != "0") {
++            return fail("LUISA_CUDA_TILE_WORKER_WARPS requires 0, 1, 2, 4, 8, 16 or 32 (values above 8 need CUDA 13.5)");
++        }
++    }
+     auto scan_chunk_extent = 0u;
+     if (auto chunk = luisa::get_environment_variable("LUISA_CUDA_TILE_SCAN_CHUNK")) {
+         auto value = luisa::string_view{*chunk};
+diff --git a/src/backends/cuda/tile/cuda_tile_codegen.cpp b/src/backends/cuda/tile/cuda_tile_codegen.cpp
+--- a/src/backends/cuda/tile/cuda_tile_codegen.cpp
++++ b/src/backends/cuda/tile/cuda_tile_codegen.cpp
+@@ -1327,7 +1327,11 @@
+             _artifact.independent_axis_extent = _independent_axis_extent;
+         }
+-        if (_worker_warps != 0u &&
+-            ((_worker_warps != 4u && _worker_warps != 8u) || _target_sm != 89u)) {
+-            _fail(nullptr, "worker-warp calibration requires SM89 and 4 or 8 worker warps");
++        // CUDA 13.5 widened num_worker_warps_per_cta from {4, 8} to every power
++        // of two in [1, 32]. The SM89 calibration boundary is unchanged, and a
++        // value the installed toolkit does not understand still fails closed in
++        // NVRTC/tileiras instead of being dropped before the compiler sees it.
++        if (_worker_warps != 0u &&
++            (!std::has_single_bit(_worker_warps) || _worker_warps > 32u || _target_sm != 89u)) {
++            _fail(nullptr, "worker-warp calibration requires SM89 and a power-of-two worker count in [1, 32] (values above 8 need CUDA 13.5)");
+             return std::move(_artifact);
+         }

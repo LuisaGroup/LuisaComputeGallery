@@ -176,6 +176,13 @@ function gallery_target(name, options)
     -- build-time-only dependency keeps `xmake build <example>` self-contained.
     if has_config("lc_cuda_backend") then
         add_deps("lc-nvrtc", {inherit = false, links = false})
+        -- Native CUDA Tile IR (CUDA 13.4+): luisa-backend-cuda runs
+        -- luisa_cuda_tile_compiler from its own directory, so it has to sit next
+        -- to the backend binary - same wiring as luisa_nvrtc above. On toolkits
+        -- without the Tile toolchain the LuisaCompute target degrades to a phony
+        -- no-op target (src/backends/cuda/xmake.lua), so the dependency is safe
+        -- to declare unconditionally.
+        add_deps("lc-cuda-tile-compiler", {inherit = false, links = false})
     end
 
     for _, define in ipairs(options.defines or {}) do

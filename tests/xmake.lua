@@ -257,10 +257,28 @@ end
 --   xmake run test_qwen_ops_tile dx
 local qwen_device_tests = {
     "test_qwen_kv_cache",
+    -- Phase 9c LCV-1: capability record vs the VK backend's own negotiation
+    -- (VulkanExtensionStatusExt::cooperative_status()); runs on any backend,
+    -- asserting the fail-closed answer on dx/cuda.
+    "test_qwen_caps",
+ -- Phase 9c LCV-2: the VK cooperative-vector spike. Standalone experiment: it
+ -- skips (exit 0) on any backend that did not negotiate the extension and
+ -- reports the exact stage where the store/layout or matmul contract stops.
+ "test_qwen_coopvec_spike",
     "test_qwen_ops_dsl",
+    "test_qwen_native_gemm",
+ "test_qwen_native_attention",
     "test_qwen_ops_tile",
     "test_qwen_mtp",
 }
+-- Phase 9c LCV-3 (registered separately): the split-barrier differential. It needs
+-- VulkanDeviceConfigExt (the explicit enable_shader_split_barrier() opt-in), so it
+-- includes the vendored Vulkan headers volk carries.
+gallery_test("test_qwen_split_barrier", {
+    sources = {"integration/qwen/test_qwen_split_barrier.cpp"},
+    deps = {"lc-example-qwen"},
+    includes = {"$SRC/qwen", "$SRC/ocr", "integration/qwen", "$LC/src/ext/volk/include"},
+})
 for _, name in ipairs(qwen_device_tests) do
     gallery_test(name, {
         sources = {"integration/qwen/" .. name .. ".cpp"},

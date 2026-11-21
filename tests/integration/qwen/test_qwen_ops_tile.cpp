@@ -269,6 +269,151 @@ void test_utilities(Device &dev, Stream &stream) {
 }
 
 // ---------------------------------------------------------------------------
+// Attention LENGTH BUCKETS (phase 9d). The device-visible-length shader streams
+// a STATIC key range, so the executor compiles it per ceil(kv_len/bucket)*bucket
+// bucket instead of once for the full capacity. This proves, on the device:
+//   * tile_attention_bucket_capacity() (the shared policy) at the bucket
+//     boundaries 0/1/511/512/513/..., including the capacity clamp;
+//   * every bucket specialization matches the independent CPU oracle at its
+//     kv_len, so the shorter scan is not a shorter answer;
+//   * every bucket specialization is BIT-IDENTICAL to the full-capacity
+//     specialization at the same length: the keys the bucket does not visit
+//     contribute exactly acc*1 + v*0 in the full-capacity arm, so dropping them
+//     cannot move a bit. This is what makes the bucket a pure cost reduction.
+//   * the same for a prefill bucket arm (rows > 1, causal diagonal).
+// ---------------------------------------------------------------------------
+void test_attention_buckets(Device &dev, Stream &stream) {
+    // -- policy (device-free) ------------------------------------------------
+    {
+        const uint32_t CAP = 4096;
+        check(tile_attention_bucket_capacity(0, 512, CAP) == CAP, "bucket policy: kv_len 0 -> full capacity");
+        check(tile_attention_bucket_capacity(1, 512, CAP) == 512, "bucket policy: kv_len 1 -> 512");
+        check(tile_attention_bucket_capacity(511, 512, CAP) == 512, "bucket policy: kv_len 511 -> 512");
+        check(tile_attention_bucket_capacity(512, 512, CAP) == 512, "bucket policy: kv_len 512 -> 512");
+        check(tile_attention_bucket_capacity(513, 512, CAP) == 1024, "bucket policy: kv_len 513 -> 1024");
+        check(tile_attention_bucket_capacity(1024, 512, CAP) == 1024, "bucket policy: kv_len 1024 -> 1024");
+        check(tile_attention_bucket_capacity(1025, 512, CAP) == 1536, "bucket policy: kv_len 1025 -> 1536");
+        check(tile_attention_bucket_capacity(4095, 512, CAP) == CAP, "bucket policy: kv_len 4095 -> capacity");
+        check(tile_attention_bucket_capacity(4096, 512, CAP) == CAP, "bucket policy: kv_len 4096 -> capacity");
+        check(tile_attention_bucket_capacity(4000, 0, CAP) == CAP, "bucket policy: bucket 0 disables bucketing");
+        // The clamp is the last, partially filled bucket (max_context not a
+        // multiple of the bucket) and never goes below kv_len.
+        check(tile_attention_bucket_capacity(600, 512, 1000) == 1000, "bucket policy: clamps to capacity");
+        check(tile_attention_bucket_capacity(999, 512, 1000) == 1000, "bucket policy: clamp keeps kv_len covered");
+        check(tile_attention_bucket_capacity(300, 128, 1000) == 384, "bucket policy: bucket 128");
+    }
+    QwenTileConfig cfg;
+    cfg.q_heads = 2;
+    cfg.kv_heads = 1;
+    cfg.attn_head_dim = 4;
+    cfg.rope_dim = 2;
+    const uint32_t QH = cfg.q_heads, KH = cfg.kv_heads, HD = cfg.attn_head_dim;
+    const uint32_t CAP = 1536, BUCKET = 512;
+    const auto scale = cfg.attn_scale();
+    luisa::vector<float> kc(size_t(CAP) * KH * HD), vc(size_t(CAP) * KH * HD);
+    for (size_t i = 0; i < kc.size(); i++) {
+        kc[i] = std::sin(float(i) * 0.021f) * 0.8f;
+        vc[i] = std::cos(float(i) * 0.017f + 0.4f) * 0.6f;
+    }
+    luisa::vector<float> q1(QH * HD), g1(QH * HD);
+    for (size_t i = 0; i < q1.size(); i++) {
+        q1[i] = std::sin(float(i) * 0.31f + 1.1f);
+        g1[i] = std::cos(float(i) * 0.23f) * 2.0f;
+    }
+    auto bkc = upload(dev, stream, kc);
+    auto bvc = upload(dev, stream, vc);
+    auto bq = upload(dev, stream, q1);
+    auto bg = upload(dev, stream, g1);
+    stream << synchronize();
+    // kv lengths at and around every bucket boundary this capacity has.
+    const uint32_t lens[] = {1, 511, 512, 513, 1023, 1024, 1025, 1535, 1536};
+    auto run_decode = [&](const t::Shader &sh, uint32_t kv_len) {
+        auto blen = upload(dev, stream, luisa::vector<int32_t>{int32_t(kv_len)});
+        auto bout = dev.create_buffer<float>(QH * HD);
+        stream << synchronize();
+        stream << sh(bq, bg, bkc, bvc, blen, bout).dispatch() << synchronize();
+        return download(stream, bout, QH * HD);
+    };
+    // Full-capacity arm: the reference every bucket must reproduce bit-exactly.
+    auto cap_full = capture_tile_attn_decode_dynamic(cfg, CAP);
+    if (!cap_full.ok()) {
+        check(false, "attn bucket: full-capacity capture", cap_full.status.message);
+    } else {
+        auto sh_full = t::compile(dev, *cap_full.kernel);
+        if (!sh_full) {
+            check(false, "attn bucket: full-capacity compile",
+                  luisa::string{sh_full.metadata().error.c_str()});
+        } else {
+            for (auto kv_len : lens) {
+                const auto cap = tile_attention_bucket_capacity(kv_len, BUCKET, CAP);
+                const auto tag = luisa::string{"kv_len "} + std::to_string(kv_len).c_str() +
+                                 " bucket " + std::to_string(cap).c_str();
+                luisa::vector<float> want;
+                if (!ref_tile_attn_decode(q1, g1, kc, vc, QH, KH, HD, scale, kv_len, want).ok()) {
+                    check(false, "attn bucket: decode oracle", tag);
+                    continue;
+                }
+                auto full = run_decode(sh_full, kv_len);
+                check_close(full, want, 3e-5f, 3e-5f,
+                            (luisa::string{"attn decode full-capacity vs oracle "} + tag).c_str());
+                auto cap_b = capture_tile_attn_decode_dynamic(cfg, cap);
+                auto sh_b = t::compile(dev, *cap_b.kernel);
+                if (!sh_b) {
+                    check(false, "attn bucket: compile", tag);
+                    continue;
+                }
+                auto got = run_decode(sh_b, kv_len);
+                check_close(got, want, 3e-5f, 3e-5f,
+                            (luisa::string{"attn decode bucket vs oracle "} + tag).c_str());
+                check_close(got, full, 0.0f, 0.0f,
+                            (luisa::string{"attn decode bucket == full capacity "} + tag).c_str());
+            }
+        }
+    }
+    // Prefill bucket arm (rows > 1, causal diagonal inside the bucket).
+    {
+        const uint32_t T = 3;
+        for (auto kv_len : {512u, 513u, 1024u, 1536u}) {
+            const uint32_t pos0 = kv_len - T;
+            const auto cap = tile_attention_bucket_capacity(kv_len, BUCKET, CAP);
+            const auto tag = luisa::string{"prefill kv_len "} + std::to_string(kv_len).c_str() +
+                             " bucket " + std::to_string(cap).c_str();
+            luisa::vector<float> pq(size_t(T) * QH * HD), pgate(size_t(T) * QH * HD);
+            for (size_t i = 0; i < pq.size(); i++) {
+                pq[i] = std::sin(float(i) * 0.19f + 0.3f);
+                pgate[i] = std::cos(float(i) * 0.11f) * 1.5f;
+            }
+            luisa::vector<float> want;
+            if (!ref_tile_attn_prefill(pq, pgate, kc, vc, T, QH, KH, HD, scale, pos0, kv_len, want).ok()) {
+                check(false, "attn prefill bucket oracle", tag);
+                continue;
+            }
+            auto bpq = upload(dev, stream, pq);
+            auto bpg = upload(dev, stream, pgate);
+            auto bpl = upload(dev, stream, luisa::vector<int32_t>{int32_t(pos0), int32_t(kv_len)});
+            stream << synchronize();
+            for (auto use_cap : {cap, CAP}) {
+                auto pc = capture_tile_attn_prefill_dynamic(cfg, T, use_cap);
+                auto sh = t::compile(dev, *pc.kernel);
+                if (!sh) {
+                    check(false, "attn prefill bucket compile", tag);
+                    continue;
+                }
+                auto bout = dev.create_buffer<float>(want.size());
+                stream << sh(bpq, bpg, bkc, bvc, bpl, bout).dispatch() << synchronize();
+                auto got = download(stream, bout, want.size());
+                stream << synchronize();
+                check_close(got, want, 3e-5f, 3e-5f,
+                            (luisa::string{use_cap == cap ? "attn prefill bucket vs oracle "
+                                                          : "attn prefill full-capacity vs oracle "} +
+                             tag)
+                                .c_str());
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Attention chain: prepare q/k/v -> rope (polynomial + host-table variants)
 // -> kv append -> prefill -> decode (static + dynamic-length variants).
 // ---------------------------------------------------------------------------
@@ -426,6 +571,7 @@ void test_attention(Device &dev, Stream &stream) {
             check_close(got, dwant, 3e-5f, 3e-5f, "tile attn decode dynamic");
         }
     }
+    test_attention_buckets(dev, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +623,143 @@ void test_gdn(Device &dev, Stream &stream) {
         stream << synchronize();
         check_close(cgot, cwant, 2e-5f, 2e-5f, "tile gdn conv ping-pong");
         check_close(gring, ring_ref, 1e-6f, 1e-6f, "tile gdn conv ring update");
+    }
+    // -----------------------------------------------------------------------
+    // Multi-token conv chunk (phase 9d): ONE kernel per chunk carries the
+    // causal window in registers and produces the ring image. Differential
+    // against (a) the CPU oracle and (b) the per-token step kernel above, at
+    // chunk boundaries: tokens < R, tokens == R, tokens > R, pos0 % R != 0, and
+    // a non-zero ring history (so a wrong slot rotation cannot pass).
+    // -----------------------------------------------------------------------
+    {
+        const uint32_t R = KS - 1;
+        luisa::vector<float> span_src(28 * C);
+        for (size_t i = 0; i < span_src.size(); i++) { span_src[i] = std::sin(float(i) * 0.29f + 0.7f); }
+        struct ConvCase { uint32_t pos0, rows; };
+        const ConvCase conv_cases[] = {
+            {0, 1}, {0, 2}, {0, 3}, {0, 4}, {1, 1}, {1, 2}, {1, 3},
+            {2, 3}, {3, 5}, {5, 7}, {6, 2}, {7, 1}, {9, 4}};
+        for (const auto &cc : conv_cases) {
+            luisa::vector<float> ring0(size_t(C) * R);
+            for (size_t i = 0; i < ring0.size(); i++) { ring0[i] = std::sin(float(i) * 0.53f + 1.3f) * 0.15f; }
+            auto ring_ref = ring0;
+            luisa::vector<float> want;
+            if (!ref_tile_gdn_conv(luisa::span{span_src}.subspan(cc.pos0 * C, cc.rows * C), cw,
+                                   ring_ref, cc.rows, C, KS, cc.pos0, want)
+                     .ok()) {
+                check(false, "gdn conv chunk oracle");
+                continue;
+            }
+            luisa::vector<float> rows_src(span_src.begin() + cc.pos0 * C,
+                                          span_src.begin() + (cc.pos0 + cc.rows) * C);
+            auto bsrc = upload(dev, stream, rows_src);
+            auto brin = upload(dev, stream, ring0);
+            auto brout = dev.create_buffer<float>(ring0.size());
+            auto bposc = upload(dev, stream, luisa::vector<int32_t>{int32_t(cc.pos0)});
+            auto bout = dev.create_buffer<float>(want.size());
+            stream << synchronize();
+            auto cap = capture_tile_gdn_conv_silu_chunk(C, KS, cc.rows);
+            const auto tag = luisa::string{"chunk pos0="} + std::to_string(cc.pos0).c_str() +
+                             " rows=" + std::to_string(cc.rows).c_str();
+            if (run(dev, stream, cap, "gdn conv chunk", bsrc, bcw, brin, bposc, brout, bout)) {
+                auto got = download(stream, bout, want.size());
+                auto gring = download(stream, brout, ring0.size());
+                stream << synchronize();
+                check_close(got, want, 2e-5f, 2e-5f, (luisa::string{"tile gdn conv chunk out "} + tag).c_str());
+                check_close(gring, ring_ref, 1e-6f, 1e-6f, (luisa::string{"tile gdn conv chunk ring "} + tag).c_str());
+            }
+        }
+        // Kernel size 3 (R = 2) and a ragged channel count: the window is two
+        // slots wide, so the initial rotation and the shift have a different
+        // arity than the model's Conv4. Same oracle.
+        {
+            const uint32_t C3 = 7, KS3 = 3, R3 = KS3 - 1;
+            luisa::vector<float> w3(C3 * KS3), ring3(size_t(C3) * R3), src3(5 * C3);
+            for (size_t i = 0; i < w3.size(); i++) { w3[i] = std::sin(float(i) * 0.17f) * 0.4f; }
+            for (size_t i = 0; i < ring3.size(); i++) { ring3[i] = std::cos(float(i) * 0.23f) * 0.3f; }
+            for (size_t i = 0; i < src3.size(); i++) { src3[i] = std::sin(float(i) * 0.31f + 2.f); }
+            const uint32_t pos0 = 3, rows = 4;
+            auto ring_ref3 = ring3;
+            luisa::vector<float> want3;
+            if (ref_tile_gdn_conv(luisa::span{src3}.subspan(pos0 * C3, rows * C3), w3, ring_ref3,
+                                  rows, C3, KS3, pos0, want3)
+                    .ok()) {
+                auto bw3 = upload(dev, stream, w3);
+                auto brin3 = upload(dev, stream, ring3);
+                auto brout3 = dev.create_buffer<float>(ring3.size());
+                auto bpos3 = upload(dev, stream, luisa::vector<int32_t>{int32_t(pos0)});
+                auto bout3 = dev.create_buffer<float>(want3.size());
+                luisa::vector<float> rows3(src3.begin() + pos0 * C3, src3.begin() + (pos0 + rows) * C3);
+                auto bsrc3 = upload(dev, stream, rows3);
+                stream << synchronize();
+                auto cap3 = capture_tile_gdn_conv_silu_chunk(C3, KS3, rows);
+                if (run(dev, stream, cap3, "gdn conv chunk ks3", bsrc3, bw3, brin3, bpos3, brout3, bout3)) {
+                    auto got3 = download(stream, bout3, want3.size());
+                    auto gring3 = download(stream, brout3, ring3.size());
+                    stream << synchronize();
+                    check_close(got3, want3, 2e-5f, 2e-5f, "tile gdn conv chunk out ks3 rows4 pos3");
+                    check_close(gring3, ring_ref3, 1e-6f, 1e-6f, "tile gdn conv chunk ring ks3 rows4 pos3");
+                }
+            } else {
+                check(false, "gdn conv chunk ks3 oracle");
+            }
+        }
+        // Kernel-vs-kernel: the same chunk through the per-token step path (its
+        // ping-pong rings) and through the chunk kernel must agree to FP32
+        // rounding, not bit-exactly: both sum the taps in the same order but the
+        // step form materializes (history+source)*weight per tap while the chunk
+        // form contracts the register window, so mul/add contraction differs by
+        // ~1 ulp. rtol 1e-6 is ~8 ulp of a unit-magnitude accumulator.
+        {
+            const uint32_t pos0 = 2, rows = 4;
+            luisa::vector<float> ring0(size_t(C) * R);
+            for (size_t i = 0; i < ring0.size(); i++) { ring0[i] = std::cos(float(i) * 0.37f + 0.2f) * 0.2f; }
+            luisa::vector<float> rows_src(span_src.begin() + pos0 * C, span_src.begin() + (pos0 + rows) * C);
+            // Chunk arm.
+            auto bsrc_c = upload(dev, stream, rows_src);
+            auto brin_c = upload(dev, stream, ring0);
+            auto brout_c = dev.create_buffer<float>(ring0.size());
+            auto bpos_c = upload(dev, stream, luisa::vector<int32_t>{int32_t(pos0)});
+            auto bout_c = dev.create_buffer<float>(rows_src.size());
+            // Step arm: whole per-token buffers and its own ping-pong pair.
+            auto brin_s = upload(dev, stream, ring0);
+            auto brout_s = dev.create_buffer<float>(ring0.size());
+            luisa::vector<Buffer<float>> st_src, st_out;
+            for (uint32_t t = 0; t < rows; t++) {
+                st_src.push_back(upload(dev, stream, luisa::vector<float>(
+                                                       rows_src.begin() + t * C, rows_src.begin() + (t + 1) * C)));
+                st_out.push_back(dev.create_buffer<float>(C));
+            }
+            auto bpos_s = dev.create_buffer<int32_t>(1);
+            stream << synchronize();
+            auto cap_chunk = capture_tile_gdn_conv_silu_chunk(C, KS, rows);
+            bool ok = run(dev, stream, cap_chunk, "gdn conv chunk (diff arm)",
+                          bsrc_c, bcw, brin_c, bpos_c, brout_c, bout_c);
+            for (uint32_t t = 0; t < rows && ok; t++) {
+                const int32_t pos = int32_t(pos0 + t);
+                stream << bpos_s.copy_from(luisa::span{&pos, 1}) << synchronize();
+                auto &rin = (t % 2u == 0u) ? brin_s : brout_s;
+                auto &rout = (t % 2u == 0u) ? brout_s : brin_s;
+                auto cap_step = capture_tile_gdn_conv_silu_step(C, KS, (pos0 + t) % R);
+                ok = run(dev, stream, cap_step, "gdn conv step (diff arm)",
+                         st_src[t], bcw, rin, bpos_s, rout, st_out[t]);
+            }
+            if (ok) {
+                luisa::vector<float> chunk_got(rows * C), step_got(rows * C);
+                luisa::vector<float> chunk_ring(ring0.size()), step_ring(ring0.size());
+                stream << bout_c.view().copy_to(luisa::span{chunk_got});
+                for (uint32_t t = 0; t < rows; t++) {
+                    stream << st_out[t].view().copy_to(luisa::span<float>{step_got.data() + t * C, C});
+                }
+                stream << brout_c.view().copy_to(luisa::span{chunk_ring});
+                // The step arm's newest ring is the buffer the last token wrote.
+                auto &step_last = (rows % 2u == 0u) ? brin_s : brout_s;
+                stream << step_last.view().copy_to(luisa::span{step_ring});
+                stream << synchronize();
+                check_close(chunk_got, step_got, 0.0f, 1e-6f, "tile gdn conv chunk == per-token step (out)");
+                check_close(chunk_ring, step_ring, 0.0f, 0.0f, "tile gdn conv chunk == per-token step (ring)");
+            }
+        }
     }
     // Gates.
     luisa::vector<float> a(T * VH), b(T * VH), ssm_a(VH), dt(VH), bwant, gwant;

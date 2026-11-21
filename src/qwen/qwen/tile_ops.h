@@ -400,6 +400,20 @@ struct TileGemmShape {
 [[nodiscard]] TileCapture capture_tile_attn_decode_dynamic(const QwenTileConfig &cfg,
                                                            uint32_t capacity);
 
+// LENGTH-BUCKET capacity of the two captures above: the STATIC key range their
+// serial loop streams. Every capture requires pos0+tokens <= kv_len <= the
+// capacity it was captured with, and its cost is that capacity -- so a
+// full-capacity specialization charges max_context keys per query even for a
+// 20-token session. This helper is the ONE policy both the executor and the
+// tests use: `bucket_keys == 0` means "no bucketing" and returns `capacity`;
+// otherwise the result is ceil(kv_len/bucket_keys)*bucket_keys clamped to
+// `capacity` (the clamp only applies to a partially filled last bucket, and the
+// result is never below kv_len when kv_len <= capacity). The number of distinct
+// results is bounded by ceil(capacity/bucket_keys)+1, which is what bounds the
+// compiled shader family.
+[[nodiscard]] uint32_t tile_attention_bucket_capacity(uint32_t kv_len, uint32_t bucket_keys,
+                                                      uint32_t capacity) noexcept;
+
 // ---------------------------------------------------------------------------
 // 7. Gated DeltaNet.
 //
@@ -441,6 +455,38 @@ struct TileGemmShape {
 [[nodiscard]] TileCapture capture_tile_gdn_conv_silu_step(uint32_t channels,
                                                           uint32_t kernel_size,
                                                           uint32_t pos_mod);
+
+// MULTI-TOKEN Conv4+SiLU chunk (prefill integration). ONE kernel produces the
+// SiLU output of `tokens` consecutive rows AND the ring image after them, so a
+// prefill chunk costs one launch instead of one per token and needs no
+// per-token source/output staging copy. Same math, same weight ABI, same ring
+// ABI as the one-token step above (this capture is its generalization; the step
+// remains the per-token differential/decode path).
+//
+// Causal addressing for row t at ABSOLUTE position pos0+t, taps j in
+// [0, kernel_size), source position s = pos0+t-(kernel_size-1)+j:
+//   s >= pos0      -> src row (s - pos0)  (already inside this chunk)
+//   0 <= s < pos0  -> ring_in[c, s % (kernel_size-1)] (history before the chunk)
+//   s < 0          -> 0
+// The kernel carries the (kernel_size-1)-wide window in SSA registers, so the
+// distinction above needs no per-row bound test beyond the initial window: the
+// window starts as history positions [pos0-R, pos0) and each row shifts in the
+// row it just consumed. Position dependence beyond that is only the initial
+// window's ring-slot rotation (pos0 % R) and the negative-position mask, both
+// from a DEVICE-VISIBLE pos0 (one int32 upload per chunk, not per token).
+// ring_out is a full image of ring_in with the last min(tokens, R) slots
+// overwritten (in absolute-position order, so the newest row wins); it is a
+// separate buffer from ring_in (write-only), so no invocation reads and writes
+// one buffer.
+// args: src [tokens, channels] (packed pre-activation rows, contiguous),
+//       weight [channels, kernel] CHANNEL-major (weight[c*kernel+j] = tap j of
+//       channel c, the GGUF ssm_conv1d [kernel, channels] payload),
+//       ring_in [channels, R] (read-only), pos_buf Buffer<int32_t> [1] = {pos0},
+//       ring_out [channels, R] (write-only), out [tokens, channels] (SiLU).
+// pos0 must be the absolute position of row 0 and non-negative.
+[[nodiscard]] TileCapture capture_tile_gdn_conv_silu_chunk(uint32_t channels,
+                                                           uint32_t kernel_size,
+                                                           uint32_t tokens);
 
 // beta/g gates. args: a [tokens, heads], b [tokens, heads],
 // ssm_a [heads], dt_bias [heads], beta_out [tokens, heads],

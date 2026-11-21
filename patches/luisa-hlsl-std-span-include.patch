@@ -1,0 +1,12 @@
+diff --git a/src/backends/common/hlsl/shader_compiler.cpp b/src/backends/common/hlsl/shader_compiler.cpp
+index bec0764f9..5c8b342ec 100644
+--- a/src/backends/common/hlsl/shader_compiler.cpp
++++ b/src/backends/common/hlsl/shader_compiler.cpp
+@@ -5,6 +5,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <fstream>
++#include <span>
+ #include <unordered_map>
+ #include <luisa/core/dynamic_module.h>
+ #include <luisa/vstl/string_utility.h>
